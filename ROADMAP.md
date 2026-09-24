@@ -1,0 +1,51 @@
+# Roadmap
+
+Budget: about 10 hours a week alongside a full-time job. Phases overlap. Dates are targets, and I review this page once a month.
+
+## Goal for March 2027
+
+- A small inference engine I wrote myself, benchmarked against nano-vllm
+- At least two merged PRs to SGLang or Miles
+- Notes that explain the core ideas of a modern inference engine in my own words
+
+## Phase 1 · Engine internals with nano-vllm (Sep to Oct 2026) · in progress
+
+- [x] Run nano-vllm end to end
+- [ ] Notes 01 to 04: request lifecycle, scheduler, block manager and prefix cache, model runner and CUDA Graph
+- [ ] Reproduce two or three open issues and write up each one
+- [ ] Experiment 001: CUDA Graph on vs off
+- [ ] Experiment 002: throughput as batch size grows
+- [ ] Fundamentals: KV cache sizing, prefill vs decode, roofline
+
+Done when I can draw a request's path through nano-vllm from memory and explain every stage.
+
+## Phase 2 · From nano-vllm to SGLang (Nov to Dec 2026)
+
+- [ ] Read mini-sglang: radix cache, chunked prefill, overlap scheduling
+- [ ] Follow the SGLang code walkthrough; run a server and `sglang.bench_serving`
+- [ ] Profile one request end to end
+- [ ] First SGLang PR (docs or tests first, then a bug fix)
+
+Done when one PR is merged.
+
+## Phase 3 · GPU programming (Dec 2026 to Jan 2027)
+
+- [ ] GPU-Puzzles and Triton-Puzzles
+- [ ] Triton softmax and matmul, with an Nsight Compute analysis of each
+- [ ] Triton FlashAttention-2 forward pass
+
+Done when I can explain from a profile why a kernel is slow.
+
+## Phase 4 · Own engine and one area in depth (Jan to Mar 2027)
+
+- [ ] A mini engine with continuous batching and prefix caching, in its own repo
+- [ ] Pick one area: RL post-training (Miles, training-inference alignment) or serving and scheduling
+- [ ] A second upstream PR in that area
+
+## Not now
+
+CUDA C++ in depth, cluster scheduling and Kubernetes, large-scale training. Revisit after Phase 3.
+
+## Reviews
+
+- 2026-09-24: created.

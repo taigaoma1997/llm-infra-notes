@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Model weights and checkpoints stay out of git
+*.safetensors
+*.bin
+*.pt
+*.pth
+models/
+checkpoints/
+
+# Profiler output is large: commit a screenshot or a summary instead
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.sqlite
+
+# Raw logs stay local; commit summaries in results/
+experiments/*/results/raw/
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
