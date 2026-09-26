@@ -13,8 +13,6 @@ Budget: about 10 hours a week alongside a full-time job. Phases overlap. Dates a
 - [x] Run nano-vllm end to end
 - [ ] Notes 01 to 04: request lifecycle, scheduler, block manager and prefix cache, model runner and CUDA Graph
 - [ ] Reproduce two or three open issues and write up each one
-- [ ] Experiment 001: CUDA Graph on vs off
-- [ ] Experiment 002: throughput as batch size grows
 - [ ] Fundamentals: KV cache sizing, prefill vs decode, roofline
 
 Done when I can draw a request's path through nano-vllm from memory and explain every stage.

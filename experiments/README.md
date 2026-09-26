@@ -5,7 +5,3 @@ Each folder answers one question with numbers. Every result lists the hardware, 
 | # | Question | Answer in one line | Status |
 |---|---|---|---|
 | | | | |
-
-## Backlog
-
-- nano-vllm: 
