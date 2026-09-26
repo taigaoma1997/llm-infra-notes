@@ -1,6 +1,5 @@
 # LLM Infra Notes
 
-I'm an ML engineer working on ads ranking models, moving into LLM inference and training systems.
 This repo is my public learning log: source-code notes, reproducible experiments, and upstream contributions.
 
 **Now:** reading nano-vllm and reproducing its open issues.
