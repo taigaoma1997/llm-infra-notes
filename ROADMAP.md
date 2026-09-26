@@ -49,3 +49,4 @@ CUDA C++ in depth, cluster scheduling and Kubernetes, large-scale training. Revi
 ## Reviews
 
 - 2026-09-24: created.
+- 2026-09-25: Phase 1 on track. One of two or three issues reproduced (#274, fix not started). Notes 01 to 04 not written yet, though the code behind them has been read.

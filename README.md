@@ -12,9 +12,7 @@ This repo is my public learning log: source-code notes, reproducible experiments
 
 | | |
 |---|---|
-| Note | [How nano-vllm chooses between prefill and decode](notes/nano-vllm/) |
-| Issue | [Reproduced nano-vllm #NNN: short title](notes/nano-vllm/issues/) |
-| Experiment | [CUDA Graph on vs off: decode latency](experiments/) |
+| Issue | [Reproduced nano-vllm #274: the engine crashes when one sequence outgrows the KV cache](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md) |
 
 ## Progress
 
@@ -34,6 +32,7 @@ Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRI
 
 <!-- Newest first, one line each, linked to the weekly update. Keep the last five. -->
 
+- **2026-09-25** Sorted nano-vllm's open issues and reproduced #274: [update](updates/2026/2026-09-25.md)
 - **2026-09-24** Started this repo and wrote down what I did before it: [update](updates/2026/2026-09-24-backfill.md)
 
 ## Layout
@@ -55,4 +54,4 @@ scripts/       new.sh creates files from templates; collect_env.sh records the s
 
 ## Contact
 
-Open an issue on this repo, or email <your personal email>.
+Open an issue on this repo, or email taigaom@umich.edu.

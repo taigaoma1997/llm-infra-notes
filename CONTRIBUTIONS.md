@@ -4,7 +4,7 @@ Issues I reproduced, PRs I opened, and upstream discussions I took part in. Newe
 
 | Date | Project | Upstream | Type | Status | Write-up |
 |---|---|---|---|---|---|
-| 2026-09-XX | nano-vllm | [#NNN](https://github.com/GeeeekExplorer/nano-vllm/issues/NNN) | reproduced issue | investigating | [notes](notes/nano-vllm/issues/) |
+| 2026-09-25 | nano-vllm | [#274](https://github.com/GeeeekExplorer/nano-vllm/issues/274) | reproduced issue | investigating | [notes](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md) |
 
 **Type:** reproduced issue · bug fix PR · docs PR · test PR · feature PR · review
 
