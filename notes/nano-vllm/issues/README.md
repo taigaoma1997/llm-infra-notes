@@ -4,7 +4,7 @@ One page per issue I reproduced. Create one with `scripts/new.sh issue nano-vllm
 
 | Issue | Title | Status | Write-up |
 |---|---|---|---|
-| [#274](https://github.com/GeeeekExplorer/nano-vllm/issues/274) | Engine crashes on `assert scheduled_seqs` when one sequence outgrows the KV cache | investigating | [274](274-kv-cache-exhausted-assert.md) |
+| [#274](https://github.com/GeeeekExplorer/nano-vllm/issues/274) | Engine crashes on `assert scheduled_seqs` when one sequence outgrows the KV cache | root cause found | [274](274-kv-cache-exhausted-assert.md) |
 
 ## Backlog
 

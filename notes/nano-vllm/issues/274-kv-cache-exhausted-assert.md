@@ -1,9 +1,9 @@
 # [nano-vllm #274] Engine crashes on assert scheduled_seqs when one sequence outgrows the KV cache
 
 - Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/274
-- Status: investigating
+- Status: root cause found; fix written and tested locally, not submitted upstream
 - Commit tested: `bb823b3` plus my local learning patches (tracing and a KV block cap, see Reproduce)
-- Written: 2026-09-25 · Updated: 2026-09-28 (scheduler-only simulation, a second path to the crash, and a test of PR #277)
+- Written: 2026-09-25 · Updated: 2026-09-28 (scheduler-only simulation, a second path to the crash, a test of PR #277, and my own fix)
 
 ## Environment
 
@@ -126,50 +126,67 @@ Running the full engine takes a minute or two per try, mostly warmup. To test ma
 
 ```python
 from types import SimpleNamespace
+
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.sequence import Sequence
 from nanovllm.sampling_params import SamplingParams
+
 
 def run(title, num_blocks, requests):
     print(f"\n=== {title} ({num_blocks} blocks = {num_blocks * 256} tokens) ===")
     cfg = SimpleNamespace(max_num_seqs=512, max_num_batched_tokens=16384, eos=-1,
                           kvcache_block_size=256, num_kvcache_blocks=num_blocks)
-    sch, names, done = Scheduler(cfg), {}, []
+    sch, names = Scheduler(cfg), {}
+
+    def report(step, seq):
+        # upstream has no finish_reason; shown as "-"
+        print(f"  step {step:>2}: {names[seq.seq_id]} finished, {getattr(seq, 'finish_reason', '-')}, "
+              f"{seq.num_completion_tokens} tokens")
+
     for name, prompt_len, max_tokens in requests:
         seq = Sequence([100] * prompt_len, SamplingParams(max_tokens=max_tokens, ignore_eos=True))
         names[seq.seq_id] = name
         sch.add(seq)
+        if seq.is_finished:  # rejected on arrival
+            report(0, seq)
     for step in range(1, 2000):
+        if sch.is_finished():
+            print(f"  all finished after {step - 1} steps")
+            return
         try:
             seqs, is_prefill = sch.schedule()
         except Exception as e:
-            print(f"step {step}: {type(e).__name__}: {e}")
-            print(f"  running={[names[s.seq_id] for s in sch.running]} "
-                  f"waiting={[names[s.seq_id] for s in sch.waiting]} finished={done}")
+            print(f"  step {step:>2}: {type(e).__name__}: {e}")
+            print(f"           running={[names[s.seq_id] for s in sch.running]} "
+                  f"waiting={[names[s.seq_id] for s in sch.waiting]}")
             return
+        if is_prefill:
+            print(f"  step {step:>2}: prefill {[names[s.seq_id] for s in seqs]}")
+        # the model only has to produce one token per sequence; a dummy token 1 stands in
         sch.postprocess(seqs, [1] * len(seqs), is_prefill)
-        done += [names[s.seq_id] for s in seqs if s.is_finished]
-        if sch.is_finished():
-            print(f"step {step}: all finished {done}")
-            return
+        for seq in seqs:
+            if seq.is_finished:
+                report(step, seq)
 
-# (name, prompt length, max_tokens)
-run("B first, then D", 4, [("B", 1000, 100), ("D", 10, 20)])
-run("D first, then B", 4, [("D", 10, 20), ("B", 1000, 100)])
-run("prompt too long", 2, [("P", 600, 10)])
-run("prompt too long, with others", 4, [("A", 10, 20), ("P", 1100, 10), ("C", 10, 5)])
+
+if __name__ == "__main__":
+    # (name, prompt length, max_tokens)
+    run("B first, then D", 4, [("B", 1000, 100), ("D", 10, 20)])
+    run("D first, then B", 4, [("D", 10, 20), ("B", 1000, 100)])
+    run("prompt too long", 2, [("P", 600, 10)])
+    run("prompt too long, with others", 4, [("A", 10, 20), ("P", 1100, 10), ("C", 10, 5)])
 ```
 
 </details>
 
-It runs against whichever `nanovllm` is on the Python path. I ran it against my local copy and against a clean `bb823b3`, and the output is identical:
+It runs against whichever `nanovllm` is on the Python path. The script lives next to my local nano-vllm checkout as `sched_sim.py`. To run it on unpatched upstream code:
 
 ```bash
 git -C nano-vllm archive bb823b3 | tar -x -C upstream     # clean copy, no local patches
 PYTHONPATH=upstream python sched_sim.py
 ```
 
-The script prints only how each run ends. In the output below, the lines before the last one in each run are my annotations of the state along the way.
+Before I wrote the fix, my local copy (which then only added logging) and a clean `bb823b3` gave identical output. The output blocks in this section come from that unfixed code, with my annotations of the state added between the printed lines. [Verification](#verification) compares before and after the fix.
 
 ### 1. Self-preemption on its own is correct
 
@@ -279,20 +296,119 @@ A smaller point: the message uses `seq`, a variable left over from whichever loo
 
 ## Fix
 
-Not written yet. After testing PR #277, I would handle the two paths separately:
+Written and tested in my local checkout, not submitted upstream. The goal: only the request that cannot fit is affected, every other request completes, and no exception is raised. The two paths are handled separately, and a new `finish_reason` tells the caller what happened.
 
-- **Prompt never fits:** reject the request when it is added, based on the prompt length alone. That is exact, wastes no compute, and does not block the queue.
-- **Grows past the cache:** instead of preempting a request that can never fit again, finish it with the tokens it already has, as a length stop, the way vLLM ends a request at `max_model_len`. The check goes before the self-preemption branch: if the blocks the request needs exceed the cache's total, finish it rather than evict it. Finishing can reuse what `postprocess` does for a normal finish: set `FINISHED`, `deallocate`, remove it from `running` ([scheduler.py#L90-L92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L90-L92)).
+The cache capacity in tokens is `num_kvcache_blocks * kvcache_block_size`. The scheduler computes it once, since `ModelRunner` has already sized the cache by the time the scheduler is created:
 
-Rejecting on prompt + `max_tokens` up front would also prevent the first path, but it is conservative: it can reject a request that would have stopped at EOS well before running out of room.
+```python
+# Scheduler.__init__
+self.max_seq_tokens = config.num_kvcache_blocks * config.kvcache_block_size
+```
+
+**Prompt never fits: reject on arrival.** In `Scheduler.add`, a prompt longer than the whole cache is marked finished instead of queued. It never blocks the requests behind it:
+
+```python
+def add(self, seq: Sequence):
+    if seq.num_tokens > self.max_seq_tokens:
+        seq.status = SequenceStatus.FINISHED
+        seq.finish_reason = "prompt_too_long"
+        return
+    self.waiting.append(seq)
+```
+
+**Grows past the cache: finish it in `postprocess`.** Right after a new token is appended, if the sequence is now longer than the cache, it can never run another step. It finishes with everything it generated, including the token just sampled: that token's logits came from KV that did fit. The check sits next to the existing EOS and `max_tokens` checks and reuses the existing finish path ([scheduler.py#L89-L92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L89-L92)):
+
+```python
+if not seq.ignore_eos and token_id == self.eos:
+    seq.finish_reason = "stop"
+elif seq.num_completion_tokens == seq.max_tokens:
+    seq.finish_reason = "length"
+elif len(seq) > self.max_seq_tokens:
+    seq.finish_reason = "kv_cache_full"
+if seq.finish_reason:
+    seq.status = SequenceStatus.FINISHED
+    self.block_manager.deallocate(seq)
+    self.running.remove(seq)
+```
+
+My first idea was to put this check in `schedule()`, before the self-preemption branch. Working it through showed two problems. Finishing the only running request there still leaves the step with an empty batch. And a request finished inside `schedule()` is not in the batch `step()` returns, so its output would never reach `generate()`. In `postprocess`, both problems go away: the request finishes one step earlier, while it is still in the batch, and a sequence that never outgrows the cache never reaches the self-preemption branch in this state. The decode loop and its `assert` are unchanged. The assert now holds for both paths and stays as a safety net.
+
+**Engine plumbing.**
+- `Sequence` gets `finish_reason = None`: `stop`, `length`, `kv_cache_full` or `prompt_too_long`.
+- `LLMEngine.add_request` returns the sequence. `generate()` records a request rejected on arrival right away, because it never appears in any step's output. If every request is rejected, the main loop never runs and the results are still returned.
+- Each result dict gains a `finish_reason` key. `text` and `token_ids` are unchanged.
+
+vLLM reports "ran past `max_model_len`" as `length`. I use a separate `kv_cache_full` so the cause is visible while learning.
+
+**Compared with PR #277:**
+
+| | PR #277 | My fix |
+|---|---|---|
+| A request that grows past the cache | `RuntimeError` | finishes with the tokens it generated, `kv_cache_full` |
+| A prompt that never fits | `RuntimeError` once nothing else is running; blocks the queue until then | rejected on arrival, `prompt_too_long`; never enters the queue |
+| Other requests in the same `generate()` call | lost with the exception | complete normally |
+| Engine after the event | every later `schedule()` raises again | keeps working |
+| Size of change | 1 file, a few lines | 4 files, a few dozen lines |
+
+**Alternatives I did not take.**
+- Rejecting on prompt + `max_tokens` up front would also catch the first path, but it is conservative: it can reject a request that would have stopped at EOS long before running out of room.
+- Raising `ValueError` in `generate()` for a prompt that never fits is simpler, and it is what vLLM's offline API does for prompts over `max_model_len`. But then one bad prompt fails the whole batch, which was the first problem with PR #277.
+
+**Limits.**
+- Capacity comes from rank 0's KV cache. Under tensor parallelism, that relies on all ranks agreeing on the block count, which is upstream [#187](https://github.com/GeeeekExplorer/nano-vllm/issues/187).
+- It does not enforce `max_model_len`, so the CUDA Graph mismatch in [#190](https://github.com/GeeeekExplorer/nano-vllm/issues/190) remains. Capping at `min(capacity, max_model_len)` in the same check would likely address both. I have not tested that.
 
 ## Verification
 
-To do once I have a fix:
+**Scheduler-only simulation** (`sched_sim.py` above). Before is a clean `bb823b3`; after is my local checkout with the fix. The lines are real output, trimmed; the comment in parentheses is mine:
 
-- All four simulation scenarios finish without an exception. D and C complete, A's output is returned, and B ends early with the tokens it generated.
-- `repro_274.py` no longer crashes.
-- `trace_example.py`, where preemption does work because there is a younger request to evict, still finishes all four requests with `preemptions: 1`.
+```
+=== B first, then D (4 blocks = 1024 tokens) ===
+before:  step  1: prefill ['B']
+         step 26: AssertionError
+after:   step  1: prefill ['B']
+         step 25: B finished, kv_cache_full, 25 tokens
+         step 26: prefill ['D']
+         step 45: D finished, length, 20 tokens
+         all finished after 45 steps
+
+=== D first, then B (4 blocks = 1024 tokens) ===
+before:  step 20: D finished, -, 20 tokens
+         step 21: prefill ['B']
+         step 46: AssertionError
+after:   step 20: D finished, length, 20 tokens
+         step 21: prefill ['B']
+         step 45: B finished, kv_cache_full, 25 tokens
+         all finished after 45 steps
+
+=== prompt too long (2 blocks = 512 tokens) ===
+before:  step  1: AssertionError
+after:   step  0: P finished, prompt_too_long, 0 tokens
+         all finished after 0 steps
+
+=== prompt too long, with others (4 blocks = 1024 tokens) ===
+before:  step  1: prefill ['A']
+         step 20: A finished, -, 20 tokens
+         step 21: AssertionError       (C never ran)
+after:   step  0: P finished, prompt_too_long, 0 tokens
+         step  1: prefill ['A', 'C']
+         step  5: C finished, length, 5 tokens
+         step 20: A finished, length, 20 tokens
+         all finished after 20 steps
+```
+
+Every step number matches what I predicted before running. For example, B's 1000-token prompt is 1001 tokens after prefill, so it passes 1024 tokens after 24 more decode steps, at step 25.
+
+**Real engine** (Qwen3-0.6B, RTX 4060 Laptop, `enforce_eager=True`):
+
+| Run | Before | After |
+|---|---|---|
+| `repro_274.py`, 500-token prompt, 2 blocks | `AssertionError` at step 14 | finishes at step 13, `kv_cache_full`, 13 tokens; the trace has no step 14 |
+| same, 50000-token prompt | `AssertionError` at step 1 (expected from the simulation's "prompt too long" case; not run on the real engine) | returns at once, `prompt_too_long`, 0 tokens; the trace shows `REJECT` and 0 steps |
+
+**Regression checks:**
+- `trace_example.py`, where preemption does work because there is a younger request to evict: still `preemptions: 1`, and all four requests finish with `length`, 64 tokens each. The longest request is about 2350 tokens against a 3840-token capacity, so the new check never fires.
+- The two prompts from `example.py`: one ends at EOS (`stop`, 208 tokens), the other at `max_tokens` (`length`, 256 tokens). `text` and `token_ids` are as before, with the new `finish_reason` key added.
 
 ## What I learned
 
@@ -303,3 +419,6 @@ To do once I have a fix:
 - Testing a PR against my own scenarios found problems its description does not mention. A scheduler-only simulation made that cheap: seconds per run, no GPU.
 - My first guess (that another request could still be running when one outgrows the cache) was wrong. Working out the block arithmetic, then running the simulation, caught it.
 - `max_model_len` in nano-vllm only sizes buffers (warmup, CUDA Graph block tables). It is not an enforced limit, which is also behind upstream #190.
+- Where a check lives matters as much as what it checks. The same condition in `schedule()` would have left an empty batch and lost the request's output; in `postprocess` it reuses the normal finish path.
+- "Don't crash" is not the whole goal. The better question is who pays for the failure: with PR #277 the whole batch does; with the fix, only the request that cannot fit.
+- Predicting the step numbers before running the simulation made the results a real test rather than something to read after the fact.
