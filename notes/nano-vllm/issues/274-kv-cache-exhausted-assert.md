@@ -1,16 +1,16 @@
 # [nano-vllm #274] Engine crashes on assert scheduled_seqs when one sequence outgrows the KV cache
 
-- Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/274
-- Status: root cause found; fix written and tested locally, not submitted upstream
-- Commit tested: `bb823b3` plus my local learning patches (tracing and a KV block cap)
-- Written: 2026-09-25 · Updated: 2026-09-28
+- Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/274 · Case 2 reported by me as [#279](https://github.com/GeeeekExplorer/nano-vllm/issues/279)
+- Status: PR open, [#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) (fixes #274 and #279)
+- Commit tested: `bb823b3` plus my local learning patches (tracing and a KV block cap); the PR itself was tested on a clean `bb823b3`
+- Written: 2026-09-25 · Updated: 2026-09-29
 
 ## TL;DR
 
 - **The bug:** if one request needs more memory than the entire KV cache, nano-vllm crashes with a bare `AssertionError`.
 - **Why:** the scheduler has no plan for a request that can never fit. It keeps the request around, finds nothing it can run, and trips an `assert`.
-- **Two ways to hit it:** a request grows too big while it generates (Case 1, the reported bug), or its prompt is too big from the start (Case 2).
-- **My fix:** turn Case 2 away at the door, and end Case 1 early with the tokens it already has. Every other request finishes normally.
+- **Two ways to hit it:** a request grows too big while it generates (Case 1, the reported bug), or its prompt is too big from the start (Case 2, which I reported as [#279](https://github.com/GeeeekExplorer/nano-vllm/issues/279)).
+- **My fix:** turn Case 2 away at the door, and end Case 1 early with the tokens it already has. Every other request finishes normally. Submitted upstream as [PR #280](https://github.com/GeeeekExplorer/nano-vllm/pull/280).
 - **Upstream PR 277** turns the crash into a clearer error, but the whole batch still stops.
 
 ## The failing cases
@@ -67,6 +67,7 @@ flowchart LR
   D --> E["Tested<br/>PR 277"]
   E --> F["Wrote<br/>my fix"]
   F --> G["Verified<br/>before vs after"]
+  G --> H["Reported 279,<br/>opened PR 280"]
 ```
 
 1. **Reproduce.** Shrank the KV cache to 2 blocks and ran a 500-token prompt. It crashed at step 14, right when it needed token 513.
@@ -76,10 +77,13 @@ flowchart LR
 5. **Tested PR 277** on the same scenarios. It replaces the crash with an error, but still stops everything.
 6. **Wrote my fix.**
 7. **Verified** every scenario before and after the fix, on the simulation and on the real engine.
+8. **Went upstream.** Reported Case 2 as its own issue, [#279](https://github.com/GeeeekExplorer/nano-vllm/issues/279), since #274 only covers Case 1. Rebuilt the fix on a clean copy of upstream, tested it again there, and opened [PR #280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) for both issues.
 
 ## The fix
 
 **Principle:** only the request that cannot fit is affected. Everyone else finishes normally, and nothing raises.
+
+Submitted upstream as [PR #280](https://github.com/GeeeekExplorer/nano-vllm/pull/280): one commit on a clean `bb823b3`, 3 files, +24 / −7, with none of my learning patches.
 
 The diagram shows a request's life. The two green checks are new:
 
@@ -113,16 +117,16 @@ flowchart TD
 
 **Why the second check lives in `postprocess()`.** My first plan was to catch Case 1 in the scheduler's decode loop, where the request evicts itself. That would still leave the step with nothing to run, and the request's output would get lost. `postprocess()` is where finished requests are already handled after each step. Ending the request there, one step earlier, avoids both problems.
 
-### PR 277 vs my fix
+### PR 277 vs my fix (PR 280)
 
-| | Upstream PR 277 | My fix |
+| | Upstream PR 277 | My fix, PR 280 |
 |---|---|---|
 | Approach | Turns the crash into a clearer error | Prevents the crash |
 | Case 1 | Error; everything stops | The request ends early and keeps its tokens |
 | Case 2 | Error, but only after it has blocked the queue | Rejected on arrival |
 | Other requests in the same batch | Their results are lost | Finish normally |
 | Engine afterwards | Raises the same error again on every step | Keeps working |
-| Size | 1 line | 4 files, a few dozen lines |
+| Size | 1 line | 3 files, +24 / −7 |
 
 The PR's error message also suggests two settings that would not help. Details are in the appendix.
 
@@ -138,6 +142,8 @@ The PR's error message also suggests two settings that would not help. Details a
 | `example.py` | Normal output | Same text, plus `finish_reason` |
 
 All step numbers matched what I predicted before running.
+
+For PR #280, I re-ran the checks on a clean `bb823b3`, without my local patches. Upstream has no option to cap the number of KV blocks, so I shrank the cache with `gpu_memory_utilization=0.36` instead, which gave 5 blocks (1280 tokens) on my GPU. Before the fix, a batch with an oversized request crashed and returned nothing. After the fix, the oversized request ended early or was rejected, and the others finished. The numbers are in the PR description.
 
 ## What I learned
 

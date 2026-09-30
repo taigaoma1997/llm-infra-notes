@@ -48,3 +48,4 @@ CUDA C++ in depth, cluster scheduling and Kubernetes, large-scale training. Revi
 
 - 2026-09-24: created.
 - 2026-09-25: Phase 1 on track. One of two or three issues reproduced (#274, fix not started). Notes 01 to 04 not written yet, though the code behind them has been read.
+- 2026-09-29: First upstream PR opened ahead of plan: nano-vllm [#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) fixes #274 and #279 (reported by me). Still one of two or three reproduced issues; notes 01 to 04 still to write.

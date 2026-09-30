@@ -11,7 +11,8 @@ This repo is my public learning log: source-code notes, reproducible experiments
 
 | | |
 |---|---|
-| Issue | [Reproduced nano-vllm #274: the engine crashes when one sequence outgrows the KV cache](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md) |
+| PR | [nano-vllm #280: finish or reject sequences that cannot fit in the KV cache](https://github.com/GeeeekExplorer/nano-vllm/pull/280) (open) |
+| Issue | [Reproduced nano-vllm #274 and reported #279: the engine crashes when a request cannot fit in the KV cache](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md) |
 
 ## Progress
 
@@ -31,6 +32,7 @@ Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRI
 
 <!-- Newest first, one line each, linked to the weekly update. Keep the last five. -->
 
+- **2026-09-29** Fixed nano-vllm #274, reported #279, opened my first upstream PR (#280): [update](updates/2026/2026-09-29.md)
 - **2026-09-25** Sorted nano-vllm's open issues and reproduced #274: [update](updates/2026/2026-09-25.md)
 - **2026-09-24** Started this repo and wrote down what I did before it: [update](updates/2026/2026-09-24-backfill.md)
 
