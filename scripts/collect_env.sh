@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Print the setup behind a result, for experiment and issue write-ups.
 #   scripts/collect_env.sh [path to an upstream checkout ...]
+#   PYTHON=/path/to/python scripts/collect_env.sh ...   to choose the interpreter
 # Missing tools are reported, not fatal.
 set -uo pipefail
 
@@ -14,7 +15,8 @@ else
   echo "gpu:      (nvidia-smi not found)"
 fi
 
-py="$(command -v python3 || command -v python || true)"
+# Set PYTHON to pick the interpreter, e.g. a conda env (on Windows, `python3` may be a Store stub).
+py="${PYTHON:-$(command -v python3 || command -v python || true)}"
 if [ -n "$py" ]; then
   "$py" - <<'EOF'
 import platform
@@ -26,7 +28,7 @@ try:
     print(f"torch:    {torch.__version__} (CUDA {torch.version.cuda})")
 except Exception:
     print("torch:    (not installed)")
-for dist in ("triton", "flash-attn", "transformers", "nano-vllm", "sglang", "vllm"):
+for dist in ("triton", "triton-windows", "flash-attn", "transformers", "nano-vllm", "sglang", "vllm"):
     try:
         print(f"{dist + ':':<10}{metadata.version(dist)}")
     except metadata.PackageNotFoundError:
