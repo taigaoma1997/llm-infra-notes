@@ -24,6 +24,34 @@ Two things fail on Windows before the model even loads (upstream [#261](https://
 
 The first run spends about a minute in the warmup pass, mostly compiling `torch.compile` and Triton kernels.
 
+## How I reproduce and test fixes
+
+I keep three checkouts of one clone (git worktrees), each with a fixed role, and switch branches rather than making a new folder per issue:
+
+| Checkout | Branch | Role |
+|---|---|---|
+| upstream | `upstream-main` | Unmodified upstream: how the original behaves |
+| dev | `fix/<issue>-<name>`, one per issue | The fix I will send upstream, nothing else |
+| learning | `learning` | My tracer, comments, and experiment-only options |
+
+Tests and notes for each issue live in one local folder, outside all three checkouts. A small launcher runs any test script against a chosen checkout, in a fresh process. On Windows it swaps NCCL for gloo at runtime, so the upstream code stays untouched.
+
+```mermaid
+flowchart LR
+  S["One test script<br/>for the issue"] --> N{"Launcher:<br/>which checkout?"}
+  N -->|upstream| U["Before the fix"]
+  N -->|dev| D["After the fix"]
+  N -->|learning| L["With tracing"]
+  N -->|ab| AB["Before and after,<br/>one command"]
+```
+
+Two kinds of test script:
+
+- **Scheduling and KV-block bugs:** drive `Scheduler` and `BlockManager` directly with fake tokens. No GPU, a few seconds per run. The [#274 write-up](issues/274-kv-cache-exhausted-assert.md) shows one.
+- **Everything else:** the real engine. To shrink the KV cache on unmodified code, lower `gpu_memory_utilization`: 0.36 gives about 5 blocks on my 8 GB GPU.
+
+Each new issue starts from a template: a checklist from reproduce to PR, one script of each kind, and folders for drafts and logs. The tools are local for now.
+
 ## Architecture
 
 <!-- Skeleton of the top-level loop. Check it against the commit you read, then extend it. -->

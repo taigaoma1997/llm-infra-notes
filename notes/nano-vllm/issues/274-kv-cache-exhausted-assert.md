@@ -287,7 +287,7 @@ Case 2 reaches the same assert without self-preemption. The prefill loop looks o
 <details>
 <summary><b>The scheduler-only simulation</b></summary>
 
-The script drives `Scheduler` and `BlockManager` directly. Each step calls `schedule()`, then `postprocess()` with a dummy token, which is all the scheduler sees of the model anyway. Requests use `ignore_eos=True`, so each runs to `max_tokens`. It lives next to my nano-vllm checkout as `sched_sim.py`.
+The script drives `Scheduler` and `BlockManager` directly. Each step calls `schedule()`, then `postprocess()` with a dummy token, which is all the scheduler sees of the model anyway. Requests use `ignore_eos=True`, so each runs to `max_tokens`. I keep it in a local lab folder next to my nano-vllm checkouts.
 
 ```python
 from types import SimpleNamespace
