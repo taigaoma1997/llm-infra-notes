@@ -26,7 +26,7 @@ The first run spends about a minute in the warmup pass, mostly compiling `torch.
 
 ## How I reproduce and test fixes
 
-I keep three checkouts of one clone (git worktrees), each with a fixed role, and switch branches rather than making a new folder per issue:
+Everything for nano-vllm lives in one project folder: three checkouts plus a `lab` folder for tests, drafts and logs. Other repos I study get the same layout. The three checkouts are git worktrees of one clone, each with a fixed role, and I switch branches rather than making a new folder per issue:
 
 | Checkout | Branch | Role |
 |---|---|---|
@@ -34,7 +34,7 @@ I keep three checkouts of one clone (git worktrees), each with a fixed role, and
 | dev | `fix/<issue>-<name>`, one per issue | The fix I will send upstream, nothing else |
 | learning | `learning` | My tracer, comments, and experiment-only options |
 
-Tests and notes for each issue live in one local folder, outside all three checkouts. A small launcher runs any test script against a chosen checkout, in a fresh process. On Windows it swaps NCCL for gloo at runtime, so the upstream code stays untouched.
+Tests and notes for each issue live in one local folder, outside all three checkouts. A small launcher runs any test script against a chosen checkout. It puts that checkout first on `sys.path` and runs each version in its own process, one after another: Python caches modules by name, so two versions of the same package cannot be compared in one process. On Windows it also swaps NCCL for gloo at runtime, so the upstream code stays untouched.
 
 ```mermaid
 flowchart LR
@@ -47,10 +47,15 @@ flowchart LR
 
 Two kinds of test script:
 
-- **Scheduling and KV-block bugs:** drive `Scheduler` and `BlockManager` directly with fake tokens. No GPU, a few seconds per run. The [#274 write-up](issues/274-kv-cache-exhausted-assert.md) shows one.
-- **Everything else:** the real engine. To shrink the KV cache on unmodified code, lower `gpu_memory_utilization`: 0.36 gives about 5 blocks on my 8 GB GPU.
+- **Scheduling and KV-cache bugs** (who runs, block allocation, preemption, prefix caching, chunked prefill): drive `Scheduler` and `BlockManager` directly with fake tokens. No GPU, a few seconds per run. Prompts given as lengths get distinct tokens, so they never share a prefix by accident; prompts given as token lists can share one on purpose. Each prefill step prints how many blocks are still free, which shows whether requests shared blocks. The [#274 write-up](issues/274-kv-cache-exhausted-assert.md) shows an early version.
+- **Everything else** (model numerics, CUDA Graph, kernels, and crashes inside the model): the real engine. To shrink the KV cache on unmodified code, lower `gpu_memory_utilization`: 0.36 gave about 5 blocks on my 8 GB GPU, depending on free memory.
 
-Each new issue starts from a template: a checklist from reproduce to PR, one script of each kind, and folders for drafts and logs. The tools are local for now.
+Each new issue starts from a template: the issue text fetched from GitHub, a checklist from reproduce to PR, one script of each kind, and folders for drafts and logs. The tools are local for now.
+
+Pitfalls I hit:
+
+- `LLMEngine` silently drops keyword arguments it does not know. An option that only exists in my learning branch (like a KV block cap) is ignored on upstream without an error, so a cross-version test can quietly run a different scenario. Settings that exist in every version, like `gpu_memory_utilization`, are safe.
+- On Windows, `bash` in cmd or PowerShell starts WSL, not Git Bash; this repo's scripts need Git Bash.
 
 ## Architecture
 
