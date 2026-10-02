@@ -24,6 +24,7 @@ This repo is my public learning log: source-code notes, reproducible experiments
 | vLLM | planned | [notes/vllm](notes/vllm/) |
 | GPU programming (Triton, CUDA) | planned | [notes/gpu](notes/gpu/) |
 | RL post-training (Miles) | planned | [notes/miles](notes/miles/) |
+| Post-training in JAX (Tunix) | planned | [notes/tunix](notes/tunix/) |
 | Papers | ongoing | [notes/papers](notes/papers/) |
 
 Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRIBUTIONS.md) · Experiments: [experiments/](experiments/)

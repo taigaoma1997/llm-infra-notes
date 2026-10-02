@@ -10,6 +10,7 @@ One folder per project or topic. Each note answers one question, and each folder
 | [vllm](vllm/) | the engine PagedAttention came from, compared with nano-vllm | planned |
 | [gpu](gpu/) | Triton and CUDA exercises, profiling | planned |
 | [miles](miles/) | RL post-training infrastructure | planned |
+| [tunix](tunix/) | Google's post-training library in JAX: SFT, RL, agentic RL | planned |
 | [papers](papers/) | reading list with short notes | ongoing |
 
 ## Suggested order for the inference track

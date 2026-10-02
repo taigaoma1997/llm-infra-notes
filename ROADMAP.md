@@ -37,7 +37,7 @@ Done when I can explain from a profile why a kernel is slow.
 ## Phase 4 · Own engine and one area in depth (Jan to Mar 2027)
 
 - [ ] A mini engine with continuous batching and prefix caching, in its own repo
-- [ ] Pick one area: RL post-training (Miles, training-inference alignment) or serving and scheduling
+- [ ] Pick one area: RL post-training (Miles or Tunix, training-inference alignment) or serving and scheduling
 - [ ] A second upstream PR in that area
 
 ## Not now
@@ -49,3 +49,4 @@ CUDA C++ in depth, cluster scheduling and Kubernetes, large-scale training. Revi
 - 2026-09-24: created.
 - 2026-09-25: Phase 1 on track. One of two or three issues reproduced (#274, fix not started). Notes 01 to 04 not written yet, though the code behind them has been read.
 - 2026-09-29: First upstream PR opened ahead of plan: nano-vllm [#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) fixes #274 and #279 (reported by me). Still one of two or three reproduced issues; notes 01 to 04 still to write.
+- 2026-10-02: Reproduced nano-vllm [#170](https://github.com/GeeeekExplorer/nano-vllm/issues/170), so two issues reproduced. Added [Tunix](https://github.com/google/tunix), Google's post-training library in JAX, to the frameworks to learn.
