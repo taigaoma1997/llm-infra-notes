@@ -6,6 +6,7 @@ One page per issue I reproduced. Create one with `scripts/new.sh issue nano-vllm
 |---|---|---|---|
 | [#274](https://github.com/GeeeekExplorer/nano-vllm/issues/274) | Engine crashes on `assert scheduled_seqs` when one sequence outgrows the KV cache | PR open ([#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280)) | [274](274-kv-cache-exhausted-assert.md) |
 | [#279](https://github.com/GeeeekExplorer/nano-vllm/issues/279) (reported by me) | Prompt longer than the whole KV cache blocks the queue and crashes | PR open ([#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280)) | [274, Case 2](274-kv-cache-exhausted-assert.md#the-failing-cases) |
+| [#170](https://github.com/GeeeekExplorer/nano-vllm/issues/170) | `RMSNorm` overwrites its fp32 input, which corrupts the residual | Reproduced; 3 upstream PRs open | [170](170-rmsnorm-fp32-residual.md) |
 
 ## Backlog
 
@@ -15,7 +16,6 @@ From a pass over all 111 issues on 2026-09-25, checked against commit `bb823b3`.
 
 | Issue | Problem | Upstream PR |
 |---|---|---|
-| [#170](https://github.com/GeeeekExplorer/nano-vllm/issues/170) | `RMSNorm` modifies an fp32 input in place, which corrupts the residual | [#169](https://github.com/GeeeekExplorer/nano-vllm/pull/169), [#205](https://github.com/GeeeekExplorer/nano-vllm/pull/205) |
 | [#190](https://github.com/GeeeekExplorer/nano-vllm/issues/190) / [#106](https://github.com/GeeeekExplorer/nano-vllm/issues/106) | CUDA Graph replay fails with a `block_tables` shape mismatch once a sequence passes `max_model_len` | [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) |
 | [#261](https://github.com/GeeeekExplorer/nano-vllm/issues/261) | Cannot start on Windows (no NCCL, no libuv); already worked around locally | [#267](https://github.com/GeeeekExplorer/nano-vllm/pull/267) |
 
