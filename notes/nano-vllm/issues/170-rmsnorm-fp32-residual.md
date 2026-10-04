@@ -24,7 +24,7 @@
 - Core isuse? -> x.float() will copy the data when x is not float32. 
 - My implementation? -> Add a if-else judgement, it can fix the bug, and find another situation that other PRs has not considered widely. My methods also fixed the second issue. 
 - Compute and speed? Almost the same time and memory across the 4 implementations. 
-- Decision? -> Decide not to raise my PR, since #170 has already resolved these two issues. 
+- Decision? -> Decide not to raise my PR, since #171 has already resolved these two issues. 
 
 ## Background
 
