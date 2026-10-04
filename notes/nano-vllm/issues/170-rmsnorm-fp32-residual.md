@@ -15,6 +15,17 @@
 - **Normal runs never hit it.** The model runs in bf16, and FlashAttention rejects fp32, so the whole model cannot run in fp32 anyway.
 - **I compared my own fix with the three open PRs.** Only #171 fixes both paths: #169 fixes only `add_rms_forward`, and #205 only `rms_forward`. None of the fixes costs any speed. In bf16 every version compiles to one GPU kernel that moves the same number of bytes, and gives bit-identical output.
 
+## What I learned
+
+- Why RMSNorm? -> To scale every token embedding to the same scale, without shifting to zero-mean.
+- Why not LayerNorm? -> Faster, no need to do average and bias.  
+- When use RMSNrom? -> before the attention and MLP in every block, and also before the last layer.
+- RMSNorm and residual? -> Only norm on the original input, residual is circumvented. 
+- Core isuse? -> x.float() will copy the data when x is not float32. 
+- My implementation? -> Add a if-else judgement, it can fix the bug, and find another situation that other PRs has not considered widely. My methods also fixed the second issue. 
+- Compute and speed? Almost the same time and memory across the 4 implementations. 
+- Decision? -> Decide not to raise my PR, since #170 has already resolved these two issues. 
+
 ## Background
 
 ### What RMSNorm does
@@ -179,17 +190,6 @@ The differences are below 0.1%. Why there is no cost:
 ### Verdict
 
 All the complete fixes perform the same, so the choice is about readability. My dtype check works, but every place that might not copy needs its own branch, and a new in-place line added later could slip through. #171 needs no branches, and so does applying #205's idea to both functions, which is how HuggingFace's `Qwen3RMSNorm` is written. #171 already fixes both paths, so a fourth PR would add nothing.
-
-## What I learned
-
-- Why RMSNorm? -> To scale every token embedding to the same scale, without shifting to zero-mean.
-- Why not LayerNorm? -> Faster, no need to do average and bias.  
-- When use RMSNrom? -> before the attention and MLP in every block, and also before the last layer.
-- RMSNorm and residual? -> Only norm on the original input, residual is circumvented. 
-- Core isuse? -> x.float() will copy the data when x is not float32. 
-- My implementation? -> Add a if-else judgement, it can fix the bug, and find another situation that other PRs has not considered widely. My methods also fixed the second issue. 
-- Compute and speed? Almost the same time and memory across the 4 implementations. 
-- Decision? -> Decide not to raise my PR, since #170 has already resolved these two issues. 
 
 ---
 

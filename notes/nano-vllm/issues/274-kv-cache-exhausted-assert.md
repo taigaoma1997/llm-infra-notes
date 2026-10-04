@@ -13,6 +13,15 @@
 - **My fix:** turn Case 2 away at the door, and end Case 1 early with the tokens it already has. Every other request finishes normally. Submitted upstream as [PR #280](https://github.com/GeeeekExplorer/nano-vllm/pull/280).
 - **Upstream PR 277** turns the crash into a clearer error, but the whole batch still stops.
 
+## What I learned
+
+- **Preemption only helps if someone else can make room.** When the request itself is the problem, evicting it just delays the crash.
+- **Whether an evicted request can come back depends on the cache's total size, not on current free space.** Free space returns as others finish; the total never grows.
+- **One stuck request at the head of the queue blocks everyone behind it.** The prefill loop never looks past it.
+- **Where a check lives matters as much as what it checks.** The same condition in the scheduler loop would have lost the request's output.
+- **"Don't crash" is not the whole goal.** Ask who pays for the failure: with PR 277 the whole batch pays; with the fix, only the request that cannot fit.
+- **Simulate first and predict the numbers.** A scheduler-only script ran in seconds, caught a wrong guess of mine, and turned each run into a real test.
+
 ## The failing cases
 
 ### Background: the KV cache is a fixed set of blocks
@@ -144,15 +153,6 @@ The PR's error message also suggests two settings that would not help. Details a
 All step numbers matched what I predicted before running.
 
 For PR #280, I re-ran the checks on a clean `bb823b3`, without my local patches. Upstream has no option to cap the number of KV blocks, so I shrank the cache with `gpu_memory_utilization=0.36` instead, which gave 5 blocks (1280 tokens) on my GPU. Before the fix, a batch with an oversized request crashed and returned nothing. After the fix, the oversized request ended early or was rejected, and the others finished. The numbers are in the PR description.
-
-## What I learned
-
-- **Preemption only helps if someone else can make room.** When the request itself is the problem, evicting it just delays the crash.
-- **Whether an evicted request can come back depends on the cache's total size, not on current free space.** Free space returns as others finish; the total never grows.
-- **One stuck request at the head of the queue blocks everyone behind it.** The prefill loop never looks past it.
-- **Where a check lives matters as much as what it checks.** The same condition in the scheduler loop would have lost the request's output.
-- **"Don't crash" is not the whole goal.** Ask who pays for the failure: with PR 277 the whole batch pays; with the fix, only the request that cannot fit.
-- **Simulate first and predict the numbers.** A scheduler-only script ran in seconds, caught a wrong guess of mine, and turned each run into a real test.
 
 ---
 

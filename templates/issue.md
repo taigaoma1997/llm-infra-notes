@@ -7,6 +7,14 @@
 
 <!-- Also add a row to CONTRIBUTIONS.md and keep its status in sync with this page. -->
 
+## TL;DR
+
+<!-- The bug, why it happens, and what I did about it, in three to five bullets. -->
+
+## What I learned
+
+-
+
 ## Environment
 
 ```
@@ -34,7 +42,3 @@ paste the output of scripts/collect_env.sh <path to the upstream checkout>
 ## Verification
 
 <!-- How you know the fix works, and that it didn't break anything else. -->
-
-## What I learned
-
--
