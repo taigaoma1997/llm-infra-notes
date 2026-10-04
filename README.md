@@ -7,12 +7,14 @@ This repo is my public learning log: source-code notes, reproducible experiments
 
 ## Highlights
 
-<!-- Three rows at most, and only things that exist. Delete this section until you have the first one. -->
+<!-- One row per PR or issue, only things that exist. When an "In progress" row is done, relabel it "Issue". -->
 
 | | |
 |---|---|
 | PR | [nano-vllm #280: finish or reject sequences that cannot fit in the KV cache](https://github.com/GeeeekExplorer/nano-vllm/pull/280) (open) |
-| Issue | [Reproduced nano-vllm #274 and reported #279: the engine crashes when a request cannot fit in the KV cache](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md) |
+| Issue | [nano-vllm #274](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md): reproduced the crash when a request cannot fit in the KV cache, and reported a second path to it as #279 |
+| Issue | [nano-vllm #170](notes/nano-vllm/issues/170-rmsnorm-fp32-residual.md): found why RMSNorm corrupts the residual in fp32, plus a second buggy path the issue missed. Compared my fix with the three open PRs; [#171](https://github.com/GeeeekExplorer/nano-vllm/pull/171) already fixes both, so no PR from me |
+| In progress | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Understood from the code; reproducing next |
 
 ## Progress
 
