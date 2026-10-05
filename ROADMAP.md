@@ -23,6 +23,7 @@ Done when I can draw a request's path through nano-vllm from memory and explain 
 - [ ] Follow the SGLang code walkthrough; run a server and `sglang.bench_serving`
 - [ ] Profile one request end to end
 - [ ] First SGLang PR (docs or tests first, then a bug fix)
+- [ ] Attend [SGLang Summit 2026](https://www.sglang.io/summit), Nov 12–13 in San Francisco (registered)
 
 Done when one PR is merged.
 

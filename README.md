@@ -2,8 +2,9 @@
 
 This repo is my public learning log: source-code notes, reproducible experiments, and upstream contributions.
 
-**Now:** reading nano-vllm and reproducing its open issues.
-**Next:** mini-sglang, then a first contribution to SGLang.
+- **Now:** reading nano-vllm and reproducing its open issues.
+- **Next:** mini-sglang, then a first contribution to SGLang.
+- **Upcoming:** [SGLang Summit 2026](https://www.sglang.io/summit), Nov 12–13 in San Francisco (registered).
 
 ## Highlights
 

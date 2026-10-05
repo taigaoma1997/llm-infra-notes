@@ -17,6 +17,10 @@
 | 02 | How does RadixAttention find and reuse a shared prefix? | planned |
 | 03 | How does overlap scheduling hide CPU work behind GPU work? | planned |
 
+## Events
+
+- [SGLang Summit 2026](https://www.sglang.io/summit), Nov 12–13, 2026, Fort Mason Center, San Francisco, hosted by LMSYS. Registered on 2026-10-04. The detailed agenda is not out yet.
+
 ## Resources
 
 - [Mini-SGLang announcement (LMSYS)](https://www.lmsys.org/blog/2025-12-17-minisgl/)
