@@ -1,9 +1,9 @@
 # [nano-vllm #190] CUDA graph replay fails once a sequence grows past max_model_len
 
 - Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/190 · Same bug, reported earlier: [#106](https://github.com/GeeeekExplorer/nano-vllm/issues/106) · Open PRs that mention it: [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191), [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258), [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263)
-- Status: investigating. I understand the bug from the code; reproducing it is next.
+- Status: investigating. I understand the bug from the code and have looked inside the recorded graphs; reproducing it is next.
 - Commit read: `bb823b3`, unmodified upstream
-- Written: 2026-10-03
+- Written: 2026-10-03 · Updated: 2026-10-05
 
 <!-- Also add a row to CONTRIBUTIONS.md and keep its status in sync with this page. -->
 
@@ -16,7 +16,10 @@
 
 ## What I learned
 
--
+- What cuda_graph looks like? -> print the results and checked
+- Difference on batch size -> the kernel changes wr.t. batch size. for batch = 1 or 16, the mat_mul change from gemv to cutlass, attention changed from 4 pieces to more pieces, 
+- How long sequence is split -> flash_fwd_splitkv + combine
+- 
 
 ## Background: how one decode step runs
 
@@ -50,7 +53,7 @@ block_tables =             context_lens =
 
 CUDA graph changes how the work is launched, not what is computed.
 
-- **Eager:** Python launches each GPU operation one by one. A decode step is hundreds of operations: by my rough count about a dozen per layer, times 28 layers. Each launch costs the CPU a few microseconds, while each operation does very little work (one token per sequence). So the GPU spends much of its time waiting for the next launch.
+- **Eager:** Python launches each GPU operation one by one. A decode step is 395 operations at batch size 1, as I counted from a recorded graph ([below](#inside-a-recorded-graph)): 14 per layer times 28 layers, plus a few more. Each launch costs the CPU a few microseconds, while each operation does very little work (one token per sequence). So the GPU spends much of its time waiting for the next launch.
 - **CUDA graph:** at startup, nano-vllm records the whole list of operations, including the memory addresses they read and write. Each decode step then runs the whole list with one `graph.replay()` call.
 - **The price:** the recording fixes every address and shape. Each step must copy its inputs into the same buffers that were used during recording, and those buffers cannot change size.
 
@@ -117,6 +120,41 @@ That matches the error in #190: `Target sizes: [32, 16]. Tensor sizes: [32, 17]`
 
 **Why not use a wider tensor at runtime?** The recorded attention kernel holds the buffer's address and its row width. A new tensor would live at another address that the recording does not know about. Using a wider table means recording the graphs again, which takes seconds.
 
+## Inside a recorded graph
+
+To see what a graph actually holds, I turned on CUDA graph debug mode before nano-vllm recorded its graphs (`enable_debug_mode()`, by swapping in a `CUDAGraph` subclass, with nano-vllm's code unchanged), then wrote each graph out with `debug_dump()`. The dump lists every recorded node: the kernel and its launch configuration `<<<grid, threads per block, shared memory>>>`. Settings: `max_num_seqs=16`, so 5 graphs were recorded, for batch sizes 1, 2, 4, 8 and 16.
+
+**The graph for batch size 1 has 395 nodes: 394 kernels and 1 memory copy.** After the embedding lookup, every layer is the same 14 kernels:
+
+| # in layer | Kernel | What it does |
+|---|---|---|
+| 1 | `triton_per_fused_..._rsqrt` | `input_layernorm`: RMSNorm, fused into one kernel by `torch.compile` |
+| 2 | `gemvx` | qkv projection (a matrix-vector product, since there is one token) |
+| 3, 4 | `triton_per_fused_..._rsqrt` | `q_norm` (grid 16: one per query head) and `k_norm` (grid 8: one per KV head) |
+| 5, 6 | `triton_poi_fused_..._cat` | rotary embedding on q, then on k |
+| 7 | `store_kvcache_kernel` | write the new token's K and V into the KV cache |
+| 8, 9 | `flash_fwd_splitkv_kernel`, `flash_fwd_splitkv_combine_kernel` | attention, split into 4 chunks, then the chunks combined |
+| 10 | `gemvx` | output projection |
+| 11 | `triton_per_fused_..._rsqrt` | `post_attention_layernorm`, with the residual add |
+| 12 | `cutlass::Kernel2` | gate and up projections |
+| 13 | `triton_poi_fused_mul_silu` | SiLU and multiply |
+| 14 | `gemvx` | down projection |
+
+The counts add up: 28 layers × 14 = 392, plus the embedding and the final norm makes 394 kernels. The extra node copies the result into the `outputs` buffer. The RMSNorm kernel appears 113 times (28 × 4 + 1), and `gemvx` 84 times (28 × 3).
+
+**Batch size 16 is not the same graph with bigger launches.** Its graph has 367 nodes, and the kernels themselves change:
+
+| | Batch size 1 | Batch size 16 |
+|---|---|---|
+| Matrix multiplies | `gemvx` (matrix × vector) for qkv, output and down | `cutlass::Kernel2` (matrix × matrix) for all four |
+| Attention | grid `{1, 4, 8}`: 4 splits × 8 KV heads, then a combine kernel | grid `{1, 16, 8}`: 16 sequences × 8 KV heads, no split, no combine kernel |
+| `q_norm`, `k_norm` | `triton_per_...` | `triton_red_...`, a different reduction strategy |
+| Elementwise kernels | grids of 1, 8, 12 blocks | grids of 16, 128, 192 blocks |
+
+The missing combine kernel accounts for the difference: 395 − 28 = 367. So a graph really is tied to one batch size: the kernel choice, not only the launch sizes, depends on it.
+
+The attention split is the split-KV idea from [below](#questions-for-later-decode-performance), done automatically by FlashAttention: at batch size 1 there are only 8 blocks of work (one per KV head), too few to fill the GPU, so each is split in 4. At batch size 16 there is enough work without splitting. The split count is part of the recorded launch, so it is fixed when the graph is recorded.
+
 ### Two claims in the issue to check
 
 - "The buffer is not cleared before copying." Columns beyond this step's width keep values from earlier steps. Does attention ever read them, given that it stops at `context_lens`?
@@ -133,7 +171,6 @@ PRs #258 ("guard CUDA graph block table replay") and #263 ("validate request tok
 ## Next
 
 - Reproduce it: shrink `max_model_len` to 512, so the buffer has 2 columns. Then let a 500-token prompt generate past 512 tokens with `ignore_eos`, with CUDA graph on and off.
-- Look inside a recorded graph: `torch.cuda.CUDAGraph.enable_debug_mode()` before recording, then `debug_dump()` writes every recorded node to a file.
 - Compare the fix directions and the three PRs.
 
 ## Questions for later: decode performance
@@ -141,5 +178,5 @@ PRs #258 ("guard CUDA graph block table replay") and #263 ("validate request tok
 These came up while reading this code. They are beyond #190:
 
 - **Inputs are rebuilt on the CPU every step.** `prepare_decode` loops over every sequence in Python each step, even though most values change only slightly. Some rebuilding is unavoidable, because the batch changes every step as sequences finish, join or get preempted (continuous batching). This is upstream [#175](https://github.com/GeeeekExplorer/nano-vllm/issues/175), with PRs [#176](https://github.com/GeeeekExplorer/nano-vllm/pull/176) and [#253](https://github.com/GeeeekExplorer/nano-vllm/pull/253). Two ideas to read about: keeping input buffers alive and updating only what changed, and SGLang's overlap scheduling, which prepares the next batch on the CPU while the GPU runs the current one.
-- **One very long sequence among short ones.** Padding is not the problem; load imbalance is. The long sequence's attention keeps working after the short ones finish. Split-KV ("Flash-Decoding") cuts a long history into chunks computed in parallel. FlashAttention's `flash_attn_with_kvcache` has a `num_splits` argument, default 0, which picks the split count automatically.
+- **One very long sequence among short ones.** Padding is not the problem; load imbalance is. The long sequence's attention keeps working after the short ones finish. Split-KV ("Flash-Decoding") cuts a long history into chunks computed in parallel. FlashAttention's `flash_attn_with_kvcache` has a `num_splits` argument, default 0, which picks the split count automatically. The recorded graphs show it at work: attention is split in 4 at batch size 1 and not split at batch size 16.
 - **Batch padding to recorded sizes.** 17 sequences run as 32. More recorded sizes would waste fewer rows, but cost more startup time and memory.

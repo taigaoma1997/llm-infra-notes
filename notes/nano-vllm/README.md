@@ -56,7 +56,7 @@ Pitfalls I hit:
 
 - `LLMEngine` silently drops keyword arguments it does not know. An option that only exists in my learning branch (like a KV block cap) is ignored on upstream without an error, so a cross-version test can quietly run a different scenario. Settings that exist in every version, like `gpu_memory_utilization`, are safe.
 - On Windows, `bash` in cmd or PowerShell starts WSL, not Git Bash; this repo's scripts need Git Bash.
-- `torch.compile` failed with `PermissionError: [WinError 5]` while renaming a temporary folder in its Triton cache (`%TEMP%\torchinductor_<user>\triton\0\`). An earlier interrupted compile had left an empty folder under the target name, Triton treated it as a cache miss, and Windows cannot rename a folder onto an existing one. Deleting the empty folders fixed it.
+- With torch 2.6 on Windows, `torch.compile` can fail with `PermissionError: [WinError 5]` while renaming a folder in its Triton cache (`%TEMP%\torchinductor_<user>\triton\0\`). On a compile-cache hit, `TritonBundler.read_and_emit` creates the target folder, then moves a temporary folder onto it with `os.replace`, which Windows does not allow. Fixed in torch 2.7 ([pytorch#146481](https://github.com/pytorch/pytorch/pull/146481)). On 2.6, set `TORCHINDUCTOR_BUNDLE_TRITON_INTO_FX_GRAPH_CACHE=0` before importing torch; my launcher does this on Windows.
 
 ## Architecture
 

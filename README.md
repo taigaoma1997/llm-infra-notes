@@ -37,7 +37,7 @@ Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRI
 
 <!-- Newest first, one line each, linked to the weekly update. Keep the last five. -->
 
-- **2026-10-05** Started mini-sglang: set it up in WSL2 on Windows and ran it end to end: [update](updates/2026/2026-10-05.md)
+- **2026-10-05** Started mini-sglang: set it up in WSL2 on Windows and ran it end to end. Looked inside nano-vllm's recorded CUDA graphs for #190: [update](updates/2026/2026-10-05.md)
 - **2026-09-29** Fixed nano-vllm #274, reported #279, opened my first upstream PR (#280), reproduced #170 and compared its fixes, started #190: [update](updates/2026/2026-09-29.md)
 - **2026-09-25** Sorted nano-vllm's open issues and reproduced #274: [update](updates/2026/2026-09-25.md)
 - **2026-09-24** Started this repo and wrote down what I did before it: [update](updates/2026/2026-09-24-backfill.md)
