@@ -60,8 +60,6 @@ Pitfalls I hit:
 
 ## Architecture
 
-<!-- Skeleton of the top-level loop. Check it against the commit you read, then extend it. -->
-
 ```mermaid
 flowchart LR
   A["LLM.generate"] --> B["LLMEngine.step"]

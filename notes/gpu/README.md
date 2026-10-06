@@ -2,6 +2,8 @@
 
 > Status: planned
 
+Some basics already came up while reading nano-vllm: what a kernel is, grids, blocks and threads, a naive and a tiled matmul, Triton versus CUDA, the kernels `torch.compile` generates, and how to read the kernels inside a recorded CUDA graph. They are in my Chinese Q&A page [QA-cuda-graph.md](../nano-vllm/QA-cuda-graph.md), section 5.
+
 ## Plan
 
 1. [GPU-Puzzles](https://github.com/srush/GPU-Puzzles): CUDA concepts through small puzzles in Numba (runs on Colab).
