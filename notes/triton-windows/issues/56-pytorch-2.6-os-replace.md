@@ -15,12 +15,11 @@
 - **Why that README:** on Windows you only reach this code if you installed triton-windows, and its README pairs PyTorch 2.6 with Triton 3.2 and lists Turing/Volta GPUs as supported only up to Triton 3.2.
 
 ## What I learned
-- A well-known package, e.g., Pytorch has issues, which can further impact other packages!
+- Even a well-known package, e.g., Pytorch can has issues, which can further impact other packages!
 - A kernel is stored twice in PyTorch -> fxgraph | triton
 - In Pytorch, they first create temporary folders and files and then change names -> For atomic writing, avoid half-written foleders. 
 - PR suggestions -> Only keep fixes/suggestions that works for everyone, try to simplify the words and description.  
 - Need to read the build.md and PR template first -> found readme has rebase before PR.
--
 
 ## Environment
 
