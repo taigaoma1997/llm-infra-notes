@@ -168,15 +168,17 @@ The attention split is the split-KV idea from [below](#questions-for-later-decod
 
 Three things are easy to mix up here. **Kernels** are the code that runs on the GPU. A **CUDA graph** is a recorded list of kernel launches. The **buffers**, such as `block_tables`, are plain blocks of GPU memory. They connect through addresses: each recorded launch holds the addresses of the memory its kernel will read and write.
 
-**One node, and what it points to:**
+### What one node holds
 
 ```mermaid
-flowchart LR
-  N["One node in the CUDA graph<br/>(attention, in the graph for batch size 1)"]
-  N -->|"① which kernel"| K["flash_fwd_splitkv_kernel<br/>FlashAttention's GPU code"]
-  N -->|"② launch config"| C["grid {1, 4, 8}<br/>128 threads per block<br/>80 KB shared memory"]
-  N -->|"③ arguments: addresses"| A["block_tables → 0xB000, 16 per row<br/>context_lens → 0xC000<br/>KV cache → 0xA000"]
-  A -.->|"on replay, the kernel reads them"| M["data in GPU memory<br/>buffers: copied in by the CPU each step<br/>KV cache: read and written by kernels"]
+flowchart TD
+  N["<b>One graph node</b><br/>attention, graph for batch size 1"]
+  N --> K["<b>① Kernel</b><br/>flash_fwd_splitkv_kernel"]
+  N --> C["<b>② Launch config</b><br/>grid {1,4,8} · 128 threads"]
+  N --> A["<b>③ Arguments</b><br/>GPU memory addresses"]
+  A --> B1["block_tables<br/>0xB000 · 16 per row"]
+  A --> B2["context_lens<br/>0xC000"]
+  A --> B3["KV cache<br/>0xA000"]
   classDef node fill:#fff3c4,stroke:#b8860b,color:#000
   classDef code fill:#e6f4ea,stroke:#34a853,color:#000
   classDef cfg fill:#f1f3f4,stroke:#5f6368,color:#000
@@ -184,41 +186,65 @@ flowchart LR
   class N node
   class K code
   class C cfg
-  class A,M mem
+  class A,B1,B2,B3 mem
 ```
 
-A node holds no data and no code. It records which kernel to launch, the launch configuration, and a set of GPU memory addresses (the addresses here are illustrative; the launch configuration is the one measured for attention at batch size 1). Because the addresses are fixed at recording time, a buffer can be neither replaced nor widened, which is the root of #190.
+| Part | In this node | Fixed when | Can it change later? |
+|---|---|---|---|
+| ① Kernel | `flash_fwd_splitkv_kernel`, FlashAttention's GPU code | when the graph is recorded | no |
+| ② Launch config | grid `{1,4,8}` (1 block of queries × 4 splits × 8 KV heads), 128 threads per block, 80 KB of shared memory | when the graph is recorded | no |
+| ③ Arguments | the addresses of `block_tables` (rows 16 entries wide), `context_lens`, the KV cache, and `q` from earlier nodes | when the graph is recorded | no |
+| The data at those addresses | this step's block numbers and lengths, the cached K and V | — | yes, every step |
 
-**Who does what, at startup and on every step:**
+A node holds no data and no code, only these three things. The addresses are illustrative; the launch configuration is the one measured for attention in the graph for batch size 1. Because the addresses and the row width are fixed when the graph is recorded, a buffer can be neither replaced nor widened. That is the root of #190.
+
+### At startup: recording the graphs
 
 ```mermaid
 sequenceDiagram
-    participant CPU as CPU (Python)
-    participant BUF as GPU memory: graph buffers<br/>block_tables, context_lens, …
-    participant G as CUDA graph<br/>(kept by the GPU driver)
-    participant K as kernels<br/>(code running on the GPU)
-    participant KV as GPU memory: KV cache
-
-    rect rgb(238, 238, 238)
-    Note over CPU,KV: At startup, once
-    CPU->>BUF: torch.zeros(512, 16) creates the buffer<br/>its address is fixed from now on, say 0xB000
-    CPU->>G: record: run the model once
-    Note over G: kernel launches are stored, not run<br/>each node = kernel + launch config + addresses<br/>e.g. attention: “block_tables at 0xB000, 16 per row”
-    end
-
-    rect rgb(255, 248, 220)
-    Note over CPU,KV: Every decode step
-    CPU->>BUF: ① copy this step's table (model_runner.py L210)<br/>a 3×3 table into the top-left corner of 0xB000
-    CPU->>G: ② graph.replay(), with no data
-    G->>K: ③ launch every node in order, with the recorded addresses
-    K->>BUF: ④ read block_tables and context_lens at the recorded addresses
-    K->>KV: ⑤ read past K and V by block number, write the new K and V
-    K->>BUF: ⑥ write the result into the outputs buffer
-    BUF-->>CPU: ⑦ the CPU reads outputs and computes logits, outside the graph
-    end
+    participant CPU
+    participant MEM as GPU memory
+    participant G as CUDA graph
+    CPU->>MEM: ① allocate the KV cache
+    CPU->>MEM: ② allocate the graph buffers
+    CPU->>G: ③ run the model while recording
+    Note right of G: each kernel launch<br/>is stored as a node,<br/>not run
+    Note over CPU,G: ④ repeat ③ for batch sizes 16, 8, 4, 2, 1
 ```
 
-Time runs from top to bottom. The grey block happens once, at startup; the yellow block repeats on every decode step. The key is step ②: the replay passes no data. Step ① has already put the data at the fixed addresses, and in steps ③ and ④ the kernels fetch it from the recorded addresses. #190 stops at step ①: a table 17 entries wide cannot be copied into the 16-wide buffer, so nothing after it runs.
+| Step | What happens | Code |
+|---|---|---|
+| ① | `allocate_kv_cache` allocates one tensor for every layer's K and V. Each attention layer keeps a view of it, so its address is fixed from now on | [model_runner.py L103-L121](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L103-L121) |
+| ② | `capture_cudagraph` allocates the graph buffers: `input_ids`, `positions`, `slot_mapping`, `context_lens` (512 each), `block_tables` (512 × 16) and `outputs` (512 × 1024) | [L227-L233](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L227-L233) |
+| ③ | `set_context` points attention at the buffers. One warm-up pass runs, then the same pass runs inside `torch.cuda.graph(...)`, which stores each kernel launch as a node instead of running it | [L240-L243](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L240-L243) |
+| ④ | The loop repeats ③ for every batch size, largest first. All graphs share one memory pool | [L238-L246](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L238-L246) |
+
+### Every decode step: replaying a graph
+
+```mermaid
+sequenceDiagram
+    participant CPU
+    participant BUF as Graph buffers
+    participant G as CUDA graph<br/>(runs its kernels)
+    participant KV as KV cache
+    CPU->>BUF: ① copy this step's inputs
+    CPU->>G: ② replay(), no data
+    G->>BUF: ③ read inputs
+    G->>KV: ④ read and write K, V
+    G->>BUF: ⑤ write outputs
+    BUF->>CPU: ⑥ read outputs, compute logits
+```
+
+| Step | What happens | Code |
+|---|---|---|
+| ① | `prepare_decode` builds this step's inputs as new small tensors, at a new address every step. `run_model` copies them into the top-left corner of the buffers, for example a 3×3 `block_tables` into the 512×16 buffer. Empty seats get `slot_mapping = -1` and `context_lens = 0` | [L204-L210](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L204-L210) |
+| ② | `run_model` replays the graph for the smallest recorded batch size that fits. The replay passes no data | [L202](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L202), [L211](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L211) |
+| ③ | Each node's kernel reads its inputs at the recorded addresses: the embedding reads `input_ids`, the rotary embedding reads `positions`, attention reads `block_tables` and `context_lens` | |
+| ④ | `store_kvcache` writes this step's K and V into the slots listed in `slot_mapping`. Attention reads the history from the KV cache, block by block | [attention.py L61-L74](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L61-L74) |
+| ⑤ | The last node copies the final hidden states into `outputs` | [L243](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L243) |
+| ⑥ | `compute_logits` runs eagerly on `outputs[:bs]`, outside the graph | [L212](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L212) |
+
+#190 stops at step ①: a table 17 entries wide cannot be copied into the 16-wide buffer, so the replay never starts.
 
 ### One graph, unpacked
 
@@ -256,31 +282,6 @@ CUDA graph: graphs[1]              (recorded at startup, kept by the GPU driver;
 - **`block_tables`** is just a block of GPU memory. Its only link to the graph is that node #8's arguments hold its address and its row width, 16
 
 The `.dot` dump does not print the arguments, but they are recorded with each node.
-
-### Startup versus every step
-
-```
-At startup, once
-  ModelRunner.__init__
-   ├─ allocate_kv_cache()        → KV cache at a fixed address
-   └─ capture_cudagraph()
-       ├─ torch.zeros(512, 16) …  → graph buffers at fixed addresses
-       ├─ set_context(...)        → attention will read the buffers
-       └─ run the model while recording:
-            each kernel launch is not executed but stored as a node
-            (kernel + launch config + the addresses of buffers, KV cache, memory pool)
-            once per batch size: graphs[16], graphs[8], …, graphs[1]
-
-Every decode step
-  Scheduler.schedule()          seq.block_table = [5, 9, 12]             (CPU, Python list)
-  prepare_decode()              new small tensors, block_tables 3×3      (new address every step)
-  run_model()
-   ├─ copy the small tensors into the graph buffers (L204-L210)           ← #190 fails here
-   ├─ graphs[4].replay()        the GPU runs all of the graph's nodes (395 at batch size 1) with their recorded addresses
-   └─ compute_logits(outputs)   eager, outside the graph
-```
-
-The small tensors live at a new address every step, while the graph only knows the buffer addresses from startup. That is why every step has to copy its inputs into the buffers before the replay.
 
 ### Every buffer the graph uses
 

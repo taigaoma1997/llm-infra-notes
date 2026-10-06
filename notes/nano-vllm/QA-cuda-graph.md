@@ -554,15 +554,17 @@ graph 里没有但很常见的：softmax、LayerNorm（`vectorized_layer_norm_ke
 
 **一句话**：kernel 是在 GPU 上跑的代码；CUDA graph 是录下来的一串 kernel 启动；缓冲区（比如 `block_tables`）只是显存里的一块数据。三者靠**地址**连在一起：graph 里每个节点都记着它的 kernel 要读写哪些显存地址。
 
-### 图 A：一个 graph 节点由什么组成
+### 图 A：一个 graph 节点里有什么
 
 ```mermaid
-flowchart LR
-  N["CUDA graph 里的一个节点<br/>（batch=1 那个 graph 的 attention 层）"]
-  N -->|"① 调用哪个 kernel"| K["flash_fwd_splitkv_kernel<br/>flash-attn 写的 GPU 代码"]
-  N -->|"② 启动配置"| C["grid {1, 4, 8}<br/>每个 block 128 个线程<br/>80 KB shared memory"]
-  N -->|"③ 参数：显存地址"| A["block_tables → 0xB000，每行 16 个<br/>context_lens → 0xC000<br/>KV cache → 0xA000"]
-  A -.->|"replay 时 kernel 按地址去读"| M["显存里的数据<br/>缓冲区：每一步由 CPU 复制进来<br/>KV cache：由 kernel 自己读写"]
+flowchart TD
+  N["<b>一个 graph 节点</b><br/>attention，batch=1 那个 graph"]
+  N --> K["<b>① 调用哪个 kernel</b><br/>flash_fwd_splitkv_kernel"]
+  N --> C["<b>② 启动配置</b><br/>grid {1,4,8} · 128 线程"]
+  N --> A["<b>③ 参数</b><br/>显存地址"]
+  A --> B1["block_tables<br/>0xB000 · 每行 16 个"]
+  A --> B2["context_lens<br/>0xC000"]
+  A --> B3["KV cache<br/>0xA000"]
   classDef node fill:#fff3c4,stroke:#b8860b,color:#000
   classDef code fill:#e6f4ea,stroke:#34a853,color:#000
   classDef cfg fill:#f1f3f4,stroke:#5f6368,color:#000
@@ -570,50 +572,65 @@ flowchart LR
   class N node
   class K code
   class C cfg
-  class A,M mem
+  class A,B1,B2,B3 mem
 ```
 
-怎么读：
+| 部分 | 这个节点里是什么 | 什么时候定下来 | 之后能变吗 |
+|---|---|---|---|
+| ① kernel | `flash_fwd_splitkv_kernel`，flash-attn 的 GPU 代码 | 录制时 | 不能 |
+| ② 启动配置 | grid `{1,4,8}`（1 个 query 块 × 切 4 段 × 8 个 KV 头），每个 block 128 个线程，80 KB shared memory | 录制时 | 不能 |
+| ③ 参数 | `block_tables`（每行 16 个）、`context_lens`、KV cache、前面节点算出的 `q` 的地址 | 录制时 | 不能 |
+| 这些地址上的**数据** | 这一步的 block 编号、长度、已有的 K/V | — | 每一步都变 |
 
-- 黄色是 graph 里的一个节点。它**本身不含数据、也不含代码**，只记了三样东西：① 调用哪个 kernel（绿色，真正的代码在 flash-attn 库里）；② 启动配置（开多少 block、每个 block 多少线程）；③ 一组**显存地址**（蓝色）
-- 地址是录制时定下来的（`0xA000` 这些是示意），所以缓冲区不能换、也不能变宽——这就是 #190 的根
-- 启动配置是实测值：batch=1 那个 graph 里 attention 节点的 `<<<{1,4,8}, 128, 81920>>>`
+节点**本身不含数据、也不含代码**，只记了这三样。地址是示意；启动配置是实测的（batch=1 那个 graph 里的 attention）。地址和每行宽度在录制时就定死了，所以缓冲区不能换、也不能变宽——这就是 #190 的根。
 
-### 图 B：启动时和每一步，谁对谁做了什么
+### 图 B：启动时，录 graph
 
 ```mermaid
 sequenceDiagram
-    participant CPU as CPU（Python 代码）
-    participant BUF as 显存：graph 缓冲区<br/>block_tables、context_lens 等
-    participant G as CUDA graph<br/>（存在显卡驱动里）
-    participant K as kernel<br/>（GPU 上跑的代码）
-    participant KV as 显存：KV cache
-
-    rect rgb(238, 238, 238)
-    Note over CPU,KV: 启动时（只做一次）
-    CPU->>BUF: torch.zeros(512, 16) 开好缓冲区<br/>地址从此固定，比如 0xB000
-    CPU->>G: 录制：把模型跑一遍
-    Note over G: kernel 启动不执行，而是记成节点<br/>每个节点 = 哪个 kernel + 启动配置 + 地址参数<br/>例：attention 节点记着“block_tables 在 0xB000，每行 16 个”
-    end
-
-    rect rgb(255, 248, 220)
-    Note over CPU,KV: 每一步 decode
-    CPU->>BUF: ① 复制这一步的表（model_runner.py 第 210 行）<br/>3×3 的小表写进 0xB000 的左上角
-    CPU->>G: ② graph.replay()，不带任何数据
-    G->>K: ③ 按顺序启动全部节点，参数还是录好的地址
-    K->>BUF: ④ 按录好的地址读 block_tables、context_lens
-    K->>KV: ⑤ 按 block 编号读历史 K、V，写入新 K、V
-    K->>BUF: ⑥ 结果写进 outputs 缓冲区
-    BUF-->>CPU: ⑦ CPU 读 outputs，算 logits（不在 graph 里）
-    end
+    participant CPU
+    participant MEM as 显存
+    participant G as CUDA graph
+    CPU->>MEM: ① 开好 KV cache
+    CPU->>MEM: ② 开好 graph 缓冲区
+    CPU->>G: ③ 录制：把模型跑一遍
+    Note right of G: 每次 kernel 启动<br/>不执行，<br/>记成一个节点
+    Note over CPU,G: ④ 对 batch 16、8、4、2、1 各重复一次 ③
 ```
 
-怎么读：
+| 步 | 做了什么 | 代码 |
+|---|---|---|
+| ① | `allocate_kv_cache` 开一整块显存放所有层的 K、V，每层 attention 拿着其中一段，地址从此固定 | [model_runner.py L103-L121](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L103-L121) |
+| ② | `capture_cudagraph` 开好 graph 缓冲区：`input_ids`、`positions`、`slot_mapping`、`context_lens`（各 512）、`block_tables`（512 × 16）、`outputs`（512 × 1024） | [L227-L233](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L227-L233) |
+| ③ | `set_context` 让 attention 用这些缓冲区；先正常跑一遍预热，再在 `torch.cuda.graph(...)` 里跑一遍：每次 kernel 启动都不执行，而是记成一个节点 | [L240-L243](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L240-L243) |
+| ④ | 对每个 batch size 重复 ③，从大到小，所有 graph 共用一块内存池 | [L238-L246](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L238-L246) |
 
-- 五列从左到右：CPU、显存里的 graph 缓冲区、CUDA graph、kernel、显存里的 KV cache。箭头是“谁对谁做了什么”，**从上往下是时间顺序**
-- 灰色块只在启动时发生一次，黄色块每一步 decode 都重复
-- 关键在 ②：replay 时 CPU **没有把数据交给 graph**。数据在 ① 已经放到固定地址上了，③④ 里 kernel 按录好的地址自己去拿
-- #190 卡在 ①：这一步的表需要 17 列，可 `0xB000` 那块每行只有 16 格，复制失败，② 之后的都不会发生
+### 图 C：每一步 decode，回放 graph
+
+```mermaid
+sequenceDiagram
+    participant CPU
+    participant BUF as graph 缓冲区
+    participant G as CUDA graph<br/>（启动它的 kernel）
+    participant KV as KV cache
+    CPU->>BUF: ① 复制这一步的输入
+    CPU->>G: ② replay()，不带数据
+    G->>BUF: ③ 读输入
+    G->>KV: ④ 读写 K、V
+    G->>BUF: ⑤ 写结果
+    BUF->>CPU: ⑥ 读结果，算 logits
+```
+
+| 步 | 做了什么 | 代码 |
+|---|---|---|
+| ① | `prepare_decode` 把这一步的输入拼成新的小张量（每步地址都不一样），`run_model` 把它们复制进缓冲区的左上角，比如 3×3 的 `block_tables` 写进 512×16 的缓冲区；空座位填 `slot_mapping = -1`、`context_lens = 0` | [L204-L210](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L204-L210) |
+| ② | 选“不小于当前 batch 的最小那个” graph 来 replay，**不带任何数据** | [L202](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L202)、[L211](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L211) |
+| ③ | 每个节点的 kernel 按录好的地址读输入：embedding 读 `input_ids`，位置编码读 `positions`，attention 读 `block_tables` 和 `context_lens` | |
+| ④ | `store_kvcache` 把这一步的 K、V 写进 `slot_mapping` 指定的格子；attention 按 block 编号读历史 K、V | [attention.py L61-L74](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L61-L74) |
+| ⑤ | 最后一个节点把结果拷进 `outputs` | [L243](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L243) |
+| ⑥ | `compute_logits` 在 graph 外面用 eager 跑，只取 `outputs[:bs]` | [L212](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L212) |
+
+#190 卡在第 ① 步：表需要 17 列，可缓冲区每行只有 16 格，复制失败，replay 根本不会开始。
 
 下面四张是同一件事的文字版，细节更多。
 
