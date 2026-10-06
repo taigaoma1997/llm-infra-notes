@@ -1,6 +1,6 @@
 # Notes
 
-One folder per project or topic. Each note answers one question, and each folder's README lists its notes in reading order.
+One folder per project or topic. Each note answers one question, and each folder's README lists its notes in reading order. Some folders also have Chinese Q&A pages (`QA-<topic>.md`) that record what I asked while learning and how my understanding was checked.
 
 | Folder | What's inside | Status |
 |---|---|---|

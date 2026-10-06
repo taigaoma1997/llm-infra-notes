@@ -86,6 +86,14 @@ flowchart LR
 
 Write-ups live in [issues/](issues/). The status of each one is tracked in [CONTRIBUTIONS.md](../../CONTRIBUTIONS.md).
 
+## Q&A (in Chinese)
+
+The questions I asked while studying each topic, with answers, diagrams and self-checks. These are my study pages, so they are in Chinese.
+
+| Topic | Page | Covers |
+|---|---|---|
+| CUDA graph | [QA-cuda-graph.md](QA-cuda-graph.md) | Graph buffers, how a decode batch runs, CUDA graph and why one per batch size, what a recorded graph contains, GPU kernels from a naive matmul to FlashAttention, how buffers, graph nodes and kernels connect, a self-quiz. Started from [#190](issues/190-cuda-graph-block-tables.md) |
+
 ## Resources
 
 - [Understanding LLM Inference Engines: Inside Nano-vLLM](https://neutree.ai/blog/nano-vllm-part-1)

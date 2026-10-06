@@ -55,6 +55,7 @@ scripts/       new.sh creates files from templates; collect_env.sh records the s
 ## Conventions
 
 - Each note answers one question. Code references are GitHub permalinks pinned to a commit.
+- Each project folder can also have Q&A pages (`QA-<topic>.md`): the questions I asked while learning a topic, with answers and self-checks. They are in Chinese, my working language for studying; everything else is in English.
 - Each number comes with the hardware, the versions, and the command that produced it.
 - Notes marked `draft` may be wrong. Corrections are welcome as issues.
 - Everything here is based on public code and public material only.
