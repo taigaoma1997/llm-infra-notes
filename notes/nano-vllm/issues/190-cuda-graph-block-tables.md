@@ -168,34 +168,57 @@ The attention split is the split-KV idea from [below](#questions-for-later-decod
 
 Three things are easy to mix up here. **Kernels** are the code that runs on the GPU. A **CUDA graph** is a recorded list of kernel launches. The **buffers**, such as `block_tables`, are plain blocks of GPU memory. They connect through addresses: each recorded launch holds the addresses of the memory its kernel will read and write.
 
+**One node, and what it points to:**
+
 ```mermaid
-flowchart TD
-  S["CPU · Scheduler.schedule<br/>seq.block_table = [5, 9, 12] (Python list)"] --> P["CPU · prepare_decode<br/>new small tensors, e.g. block_tables 3×3"]
-  P --> R["CPU · run_model"]
-  R -->|"step 1: copy into buffers (L204-L210)"| BUF["GPU memory · graph input buffers<br/>input_ids, positions, slot_mapping,<br/>context_lens, block_tables 512×16"]
-  R -->|"step 2: replay()"| N7
-  subgraph G["CUDA graph for batch size 4, recorded once at startup"]
-    N7["node #7 · store_kvcache<br/>launch config + recorded addresses"] --> N8["node #8 · attention<br/>launch config + recorded addresses"]
-    N8 --> NL["… hundreds of nodes; the last copies the result"]
-  end
-  N7 -.->|launches| K7["kernel · store_kvcache_kernel<br/>(Triton, written in nano-vllm)"]
-  N8 -.->|launches| K8["kernel · flash_fwd_splitkv_kernel<br/>(FlashAttention)"]
-  K7 -->|reads slot_mapping| BUF
-  K7 -->|writes the new K, V| KV["GPU memory · KV cache"]
-  K8 -->|reads block_tables, context_lens| BUF
-  K8 -->|reads K, V| KV
-  NL --> OUT["GPU memory · outputs 512×1024"]
-  R -->|"step 3: compute_logits, eager"| OUT
-  classDef cpu fill:#f1f3f4,stroke:#5f6368,color:#000
-  classDef mem fill:#e8f0fe,stroke:#4a6fa5,color:#000
-  classDef gnode fill:#fff3c4,stroke:#b8860b,color:#000
+flowchart LR
+  N["One node in the CUDA graph<br/>(attention, in the graph for batch size 1)"]
+  N -->|"① which kernel"| K["flash_fwd_splitkv_kernel<br/>FlashAttention's GPU code"]
+  N -->|"② launch config"| C["grid {1, 4, 8}<br/>128 threads per block<br/>80 KB shared memory"]
+  N -->|"③ arguments: addresses"| A["block_tables → 0xB000, 16 per row<br/>context_lens → 0xC000<br/>KV cache → 0xA000"]
+  A -.->|"on replay, the kernel reads them"| M["data in GPU memory<br/>buffers: copied in by the CPU each step<br/>KV cache: read and written by kernels"]
+  classDef node fill:#fff3c4,stroke:#b8860b,color:#000
   classDef code fill:#e6f4ea,stroke:#34a853,color:#000
-  class S,P,R cpu
-  class BUF,KV,OUT mem
-  class N7,N8,NL gnode
-  class K7,K8 code
-  style G fill:#fffdf3,stroke:#b8860b,color:#000
+  classDef cfg fill:#f1f3f4,stroke:#5f6368,color:#000
+  classDef mem fill:#e8f0fe,stroke:#4a6fa5,color:#000
+  class N node
+  class K code
+  class C cfg
+  class A,M mem
 ```
+
+A node holds no data and no code. It records which kernel to launch, the launch configuration, and a set of GPU memory addresses (the addresses here are illustrative; the launch configuration is the one measured for attention at batch size 1). Because the addresses are fixed at recording time, a buffer can be neither replaced nor widened, which is the root of #190.
+
+**Who does what, at startup and on every step:**
+
+```mermaid
+sequenceDiagram
+    participant CPU as CPU (Python)
+    participant BUF as GPU memory: graph buffers<br/>block_tables, context_lens, …
+    participant G as CUDA graph<br/>(kept by the GPU driver)
+    participant K as kernels<br/>(code running on the GPU)
+    participant KV as GPU memory: KV cache
+
+    rect rgb(238, 238, 238)
+    Note over CPU,KV: At startup, once
+    CPU->>BUF: torch.zeros(512, 16) creates the buffer<br/>its address is fixed from now on, say 0xB000
+    CPU->>G: record: run the model once
+    Note over G: kernel launches are stored, not run<br/>each node = kernel + launch config + addresses<br/>e.g. attention: “block_tables at 0xB000, 16 per row”
+    end
+
+    rect rgb(255, 248, 220)
+    Note over CPU,KV: Every decode step
+    CPU->>BUF: ① copy this step's table (model_runner.py L210)<br/>a 3×3 table into the top-left corner of 0xB000
+    CPU->>G: ② graph.replay(), with no data
+    G->>K: ③ launch every node in order, with the recorded addresses
+    K->>BUF: ④ read block_tables and context_lens at the recorded addresses
+    K->>KV: ⑤ read past K and V by block number, write the new K and V
+    K->>BUF: ⑥ write the result into the outputs buffer
+    BUF-->>CPU: ⑦ the CPU reads outputs and computes logits, outside the graph
+    end
+```
+
+Time runs from top to bottom. The grey block happens once, at startup; the yellow block repeats on every decode step. The key is step ②: the replay passes no data. Step ① has already put the data at the fixed addresses, and in steps ③ and ④ the kernels fetch it from the recorded addresses. #190 stops at step ①: a table 17 entries wide cannot be copied into the 16-wide buffer, so nothing after it runs.
 
 ### One graph, unpacked
 

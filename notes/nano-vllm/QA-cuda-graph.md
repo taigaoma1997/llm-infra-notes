@@ -554,36 +554,68 @@ graph 里没有但很常见的：softmax、LayerNorm（`vectorized_layer_norm_ke
 
 **一句话**：kernel 是在 GPU 上跑的代码；CUDA graph 是录下来的一串 kernel 启动；缓冲区（比如 `block_tables`）只是显存里的一块数据。三者靠**地址**连在一起：graph 里每个节点都记着它的 kernel 要读写哪些显存地址。
 
+### 图 A：一个 graph 节点由什么组成
+
 ```mermaid
-flowchart TD
-  S["CPU · Scheduler.schedule<br/>seq.block_table = [5, 9, 12] (Python list)"] --> P["CPU · prepare_decode<br/>new small tensors, e.g. block_tables 3×3"]
-  P --> R["CPU · run_model"]
-  R -->|"step 1: copy into buffers (L204-L210)"| BUF["GPU memory · graph input buffers<br/>input_ids, positions, slot_mapping,<br/>context_lens, block_tables 512×16"]
-  R -->|"step 2: replay()"| N7
-  subgraph G["CUDA graph for batch size 4, recorded once at startup"]
-    N7["node #7 · store_kvcache<br/>launch config + recorded addresses"] --> N8["node #8 · attention<br/>launch config + recorded addresses"]
-    N8 --> NL["… hundreds of nodes; the last copies the result"]
-  end
-  N7 -.->|launches| K7["kernel · store_kvcache_kernel<br/>(Triton, written in nano-vllm)"]
-  N8 -.->|launches| K8["kernel · flash_fwd_splitkv_kernel<br/>(FlashAttention)"]
-  K7 -->|reads slot_mapping| BUF
-  K7 -->|writes the new K, V| KV["GPU memory · KV cache"]
-  K8 -->|reads block_tables, context_lens| BUF
-  K8 -->|reads K, V| KV
-  NL --> OUT["GPU memory · outputs 512×1024"]
-  R -->|"step 3: compute_logits, eager"| OUT
-  classDef cpu fill:#f1f3f4,stroke:#5f6368,color:#000
-  classDef mem fill:#e8f0fe,stroke:#4a6fa5,color:#000
-  classDef gnode fill:#fff3c4,stroke:#b8860b,color:#000
+flowchart LR
+  N["CUDA graph 里的一个节点<br/>（batch=1 那个 graph 的 attention 层）"]
+  N -->|"① 调用哪个 kernel"| K["flash_fwd_splitkv_kernel<br/>flash-attn 写的 GPU 代码"]
+  N -->|"② 启动配置"| C["grid {1, 4, 8}<br/>每个 block 128 个线程<br/>80 KB shared memory"]
+  N -->|"③ 参数：显存地址"| A["block_tables → 0xB000，每行 16 个<br/>context_lens → 0xC000<br/>KV cache → 0xA000"]
+  A -.->|"replay 时 kernel 按地址去读"| M["显存里的数据<br/>缓冲区：每一步由 CPU 复制进来<br/>KV cache：由 kernel 自己读写"]
+  classDef node fill:#fff3c4,stroke:#b8860b,color:#000
   classDef code fill:#e6f4ea,stroke:#34a853,color:#000
-  class S,P,R cpu
-  class BUF,KV,OUT mem
-  class N7,N8,NL gnode
-  class K7,K8 code
-  style G fill:#fffdf3,stroke:#b8860b,color:#000
+  classDef cfg fill:#f1f3f4,stroke:#5f6368,color:#000
+  classDef mem fill:#e8f0fe,stroke:#4a6fa5,color:#000
+  class N node
+  class K code
+  class C cfg
+  class A,M mem
 ```
 
-（灰 = CPU 上的 Python 代码，黄 = graph 里的节点，绿 = kernel 代码，蓝 = 显存）
+怎么读：
+
+- 黄色是 graph 里的一个节点。它**本身不含数据、也不含代码**，只记了三样东西：① 调用哪个 kernel（绿色，真正的代码在 flash-attn 库里）；② 启动配置（开多少 block、每个 block 多少线程）；③ 一组**显存地址**（蓝色）
+- 地址是录制时定下来的（`0xA000` 这些是示意），所以缓冲区不能换、也不能变宽——这就是 #190 的根
+- 启动配置是实测值：batch=1 那个 graph 里 attention 节点的 `<<<{1,4,8}, 128, 81920>>>`
+
+### 图 B：启动时和每一步，谁对谁做了什么
+
+```mermaid
+sequenceDiagram
+    participant CPU as CPU（Python 代码）
+    participant BUF as 显存：graph 缓冲区<br/>block_tables、context_lens 等
+    participant G as CUDA graph<br/>（存在显卡驱动里）
+    participant K as kernel<br/>（GPU 上跑的代码）
+    participant KV as 显存：KV cache
+
+    rect rgb(238, 238, 238)
+    Note over CPU,KV: 启动时（只做一次）
+    CPU->>BUF: torch.zeros(512, 16) 开好缓冲区<br/>地址从此固定，比如 0xB000
+    CPU->>G: 录制：把模型跑一遍
+    Note over G: kernel 启动不执行，而是记成节点<br/>每个节点 = 哪个 kernel + 启动配置 + 地址参数<br/>例：attention 节点记着“block_tables 在 0xB000，每行 16 个”
+    end
+
+    rect rgb(255, 248, 220)
+    Note over CPU,KV: 每一步 decode
+    CPU->>BUF: ① 复制这一步的表（model_runner.py 第 210 行）<br/>3×3 的小表写进 0xB000 的左上角
+    CPU->>G: ② graph.replay()，不带任何数据
+    G->>K: ③ 按顺序启动全部节点，参数还是录好的地址
+    K->>BUF: ④ 按录好的地址读 block_tables、context_lens
+    K->>KV: ⑤ 按 block 编号读历史 K、V，写入新 K、V
+    K->>BUF: ⑥ 结果写进 outputs 缓冲区
+    BUF-->>CPU: ⑦ CPU 读 outputs，算 logits（不在 graph 里）
+    end
+```
+
+怎么读：
+
+- 五列从左到右：CPU、显存里的 graph 缓冲区、CUDA graph、kernel、显存里的 KV cache。箭头是“谁对谁做了什么”，**从上往下是时间顺序**
+- 灰色块只在启动时发生一次，黄色块每一步 decode 都重复
+- 关键在 ②：replay 时 CPU **没有把数据交给 graph**。数据在 ① 已经放到固定地址上了，③④ 里 kernel 按录好的地址自己去拿
+- #190 卡在 ①：这一步的表需要 17 列，可 `0xB000` 那块每行只有 16 格，复制失败，② 之后的都不会发生
+
+下面四张是同一件事的文字版，细节更多。
 
 ### 图 1：结构——谁指向谁
 
