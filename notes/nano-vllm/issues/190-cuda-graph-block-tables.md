@@ -19,7 +19,8 @@
 - What cuda_graph looks like? -> print the results and checked
 - Difference on batch size -> the kernel changes wr.t. batch size. for batch = 1 or 16, the mat_mul change from gemv to cutlass, attention changed from 4 pieces to more pieces, 
 - How long sequence is split -> flash_fwd_splitkv + combine
-- 
+- Understanding of block table, cuda graph, kernel -> cuda graph records a series of kernel actions, and at each action, kernels fetches data based on blcok table info. 
+
 
 ## Background: how one decode step runs
 
@@ -59,7 +60,7 @@ CUDA graph changes how the work is launched, not what is computed.
 
 Details that follow from this:
 
-- **One graph per batch size.** Shapes are part of the recording, so nano-vllm records 36 graphs, for batch sizes 1, 2, 4, 8, 16, 32 and so on up to 512. A batch is padded up to the next recorded size: 3 sequences use the graph for 4, and 17 use the graph for 32. Empty seats get `context_lens = 0`, so attention skips them, but they still go through every matrix multiply.
+- **One graph per batch size.** Shapes are part of the recording, so nano-vllm records 36 graphs, for batch sizes 1, 2, 4, 8, 16, 32 and so on up to 512. A batch is padded up to the next recorded size: 3 sequences use the graph for 4, and 17 use the graph for 32. Empty seats get `context_lens = 0`, so attention reads nothing for them, but they still go through every matrix multiply, on whatever token and position earlier steps left in those seats. Their results are thrown away, and `slot_mapping = -1` stops them from writing to the KV cache: an empty seat may compute garbage, but it never writes it anywhere that matters.
 - **Largest first, one memory pool.** The graphs are recorded from largest to smallest and share one memory pool, so the smaller ones reuse the memory the largest one claimed.
 - **Decode only.** A decode step is small and repeats thousands of times, so launch overhead dominates. A prefill step works on hundreds or thousands of tokens, so the GPU work dominates, and its size changes every time.
 - **`compute_logits` runs outside the graph.** It runs eagerly after the replay.
@@ -116,9 +117,16 @@ Follow one sequence as it grows:
 
 That matches the error in #190: `Target sizes: [32, 16]. Tensor sizes: [32, 17]`, meaning 32 sequences, a buffer 16 entries wide, and a table 17 entries wide. #106 shows `64` versus `65`, so that user had set `max_model_len` to 16384. A comment there names the cause: `max_tokens` was 20000 while `max_model_len` was the default 4096.
 
+**One long sequence fails the whole batch.** The table is one rectangle, as wide as its longest row, so a single sequence past the limit makes the copy fail for the entire step. The exception propagates out of `generate()`, which collects results in a local variable and returns only at the end. Every request in that call loses its output, including the ones that had already finished.
+
 `max_model_len` is used in only two places: to size the warmup batch and to size this buffer. It is not a limit. Apart from this buffer, the model could handle longer sequences: the rotary embedding covers 40960 positions, and an 8 GB GPU holds over 40K tokens of KV cache.
 
 **Why not use a wider tensor at runtime?** The recorded attention kernel holds the buffer's address and its row width. A new tensor would live at another address that the recording does not know about. Using a wider table means recording the graphs again, which takes seconds.
+
+### Two claims in the issue to check
+
+- "The buffer is not cleared before copying." Columns beyond this step's width keep values from earlier steps. Does attention ever read them, given that it stops at `context_lens`?
+- "Allocate one extra column." Does that fix the bug, or only move the crash from 4097 tokens to 4353?
 
 ## Inside a recorded graph
 
@@ -155,10 +163,134 @@ The missing combine kernel accounts for the difference: 395 − 28 = 367. So a g
 
 The attention split is the split-KV idea from [below](#questions-for-later-decode-performance), done automatically by FlashAttention: at batch size 1 there are only 8 blocks of work (one per KV head), too few to fill the GPU, so each is split in 4. At batch size 16 there is enough work without splitting. The split count is part of the recorded launch, so it is fixed when the graph is recorded.
 
-### Two claims in the issue to check
+## How buffers, graph nodes and kernels fit together
 
-- "The buffer is not cleared before copying." Columns beyond this step's width keep values from earlier steps. Does attention ever read them, given that it stops at `context_lens`?
-- "Allocate one extra column." Does that fix the bug, or only move the crash from 4097 tokens to 4353?
+Three things are easy to mix up here. **Kernels** are the code that runs on the GPU. A **CUDA graph** is a recorded list of kernel launches. The **buffers**, such as `block_tables`, are plain blocks of GPU memory. They connect through addresses: each recorded launch holds the addresses of the memory its kernel will read and write.
+
+```mermaid
+flowchart TD
+  S["CPU · Scheduler.schedule<br/>seq.block_table = [5, 9, 12] (Python list)"] --> P["CPU · prepare_decode<br/>new small tensors, e.g. block_tables 3×3"]
+  P --> R["CPU · run_model"]
+  R -->|"step 1: copy into buffers (L204-L210)"| BUF["GPU memory · graph input buffers<br/>input_ids, positions, slot_mapping,<br/>context_lens, block_tables 512×16"]
+  R -->|"step 2: replay()"| N7
+  subgraph G["CUDA graph for batch size 4, recorded once at startup"]
+    N7["node #7 · store_kvcache<br/>launch config + recorded addresses"] --> N8["node #8 · attention<br/>launch config + recorded addresses"]
+    N8 --> NL["… 395 nodes in all; the last copies the result"]
+  end
+  N7 -.->|launches| K7["kernel · store_kvcache_kernel<br/>(Triton, written in nano-vllm)"]
+  N8 -.->|launches| K8["kernel · flash_fwd_splitkv_kernel<br/>(FlashAttention)"]
+  K7 -->|reads slot_mapping| BUF
+  K7 -->|writes the new K, V| KV["GPU memory · KV cache"]
+  K8 -->|reads block_tables, context_lens| BUF
+  K8 -->|reads K, V| KV
+  NL --> OUT["GPU memory · outputs 512×1024"]
+  R -->|"step 3: compute_logits, eager"| OUT
+  classDef cpu fill:#f1f3f4,stroke:#5f6368,color:#000
+  classDef mem fill:#e8f0fe,stroke:#4a6fa5,color:#000
+  classDef gnode fill:#fff3c4,stroke:#b8860b,color:#000
+  classDef code fill:#e6f4ea,stroke:#34a853,color:#000
+  class S,P,R cpu
+  class BUF,KV,OUT mem
+  class N7,N8,NL gnode
+  class K7,K8 code
+  style G fill:#fffdf3,stroke:#b8860b,color:#000
+```
+
+### One graph, unpacked
+
+Every node in the graph is the same three things: which kernel, its launch configuration, and its arguments, which are GPU memory addresses. Here is the graph for batch size 4, with two nodes opened up:
+
+```
+CUDA graph: graphs[4]              (recorded at startup, kept by the GPU driver; one per batch size 1, 2, 4, 8, 16, …)
+ │
+ ├─ node #0  embedding
+ ├─ node #1  rmsnorm
+ ├─ …
+ ├─ node #7  store_kvcache
+ │    ├─ kernel ─────────► store_kvcache_kernel           (nano-vllm's Triton code)
+ │    ├─ launch config     <<<4, 128, 0>>>
+ │    └─ arguments
+ │         ├─ slot_mapping ──► [GPU memory] graph buffer slot_mapping
+ │         ├─ key, value ────► [GPU memory] graph memory pool: k, v from earlier nodes
+ │         └─ k/v cache ─────► [GPU memory] KV cache
+ │
+ ├─ node #8  attention
+ │    ├─ kernel ─────────► flash_fwd_splitkv_kernel       (FlashAttention's GPU code)
+ │    ├─ launch config     <<<{1,4,8}, 128, 81920>>>
+ │    └─ arguments
+ │         ├─ block_table ───► [GPU memory] graph buffer block_tables, 16 entries per row  ← the width is recorded
+ │         ├─ cache_seqlens ─► [GPU memory] graph buffer context_lens
+ │         ├─ q ─────────────► [GPU memory] graph memory pool: q from earlier nodes
+ │         └─ k/v cache ─────► [GPU memory] KV cache
+ ├─ …  (28 layers, 14 nodes each)
+ └─ node #394  MEMCPY ──────► [GPU memory] graph buffer outputs
+```
+
+- **kernel**: the code that runs on the GPU; the node only points to it
+- **launch config**: how many blocks, and how many threads per block
+- **arguments**: GPU memory addresses that the kernel reads and writes
+- **`block_tables`** is just a block of GPU memory. Its only link to the graph is that node #8's arguments hold its address and its row width, 16
+
+The `.dot` dump does not print the arguments, but they are recorded with each node.
+
+### Startup versus every step
+
+```
+At startup, once
+  ModelRunner.__init__
+   ├─ allocate_kv_cache()        → KV cache at a fixed address
+   └─ capture_cudagraph()
+       ├─ torch.zeros(512, 16) …  → graph buffers at fixed addresses
+       ├─ set_context(...)        → attention will read the buffers
+       └─ run the model while recording:
+            each kernel launch is not executed but stored as a node
+            (kernel + launch config + the addresses of buffers, KV cache, memory pool)
+            once per batch size: graphs[16], graphs[8], …, graphs[1]
+
+Every decode step
+  Scheduler.schedule()          seq.block_table = [5, 9, 12]             (CPU, Python list)
+  prepare_decode()              new small tensors, block_tables 3×3      (new address every step)
+  run_model()
+   ├─ copy the small tensors into the graph buffers (L204-L210)           ← #190 fails here
+   ├─ graphs[4].replay()        the GPU runs all 395 nodes with their recorded addresses
+   └─ compute_logits(outputs)   eager, outside the graph
+```
+
+The small tensors live at a new address every step, while the graph only knows the buffer addresses from startup. That is why every step has to copy its inputs into the buffers before the replay.
+
+### Every buffer the graph uses
+
+| Buffer | Shape | Created by | Written each step by | Read inside the graph by |
+|---|---|---|---|---|
+| `input_ids` | 512 | `capture_cudagraph` | CPU copy (L204) | the embedding lookup |
+| `positions` | 512 | `capture_cudagraph` | CPU copy (L205) | each layer's rotary embedding |
+| `slot_mapping` | 512 | `capture_cudagraph` | CPU copy (L206-L207) | each layer's `store_kvcache` |
+| `context_lens` | 512 | `capture_cudagraph` | CPU copy (L208-L209) | each layer's attention |
+| `block_tables` | 512 × 16 | `capture_cudagraph` | CPU copy (L210) | each layer's attention |
+| `outputs` | 512 × 1024 | `capture_cudagraph` | the graph's last node | `compute_logits`, on the CPU side of the step |
+| KV cache | 28 layers × blocks × 256 tokens × 8 heads × 128 | `allocate_kv_cache`, before recording | each layer's `store_kvcache`, inside the graph | each layer's attention |
+| graph memory pool | intermediate results | recording | nodes in the graph | the next nodes |
+
+The CPU only writes the first five buffers and reads `outputs`. The KV cache and the memory pool are read and written only by kernels inside the graph.
+
+### Addresses, block numbers and slots
+
+"Buffer" here means only those five inputs and one output, not every tensor the model touches. Intermediate results such as the hidden states live in the graph's memory pool, and the weights never change. All of them sit at fixed addresses, but only the buffers are refilled by the CPU.
+
+Three kinds of "where" are easy to confuse:
+
+```
+1. A node's arguments: GPU memory addresses, fixed when the graph is recorded
+     "the block_tables buffer is at 0xB000", "the KV cache is at 0xA000"
+2. The contents of block_tables: KV cache block numbers, data that changes every step
+     "A's history is in KV blocks 5, 9 and 12"
+3. The contents of slot_mapping: KV cache slot numbers, data that changes every step
+     "A's new K and V go to slot 12×256+87"
+```
+
+`block_tables` is one of the buffers in the first sense, and it holds numbers of the second kind. The graph never knows the values. It records addresses, shapes and which kernel to launch, and the kernels read whatever is at those addresses when the graph is replayed.
+
+So #190, in these terms: node #8 was recorded with "read `block_tables`, 16 entries per row". A sequence that needs a 17th block produces a table 17 entries wide, and the copy into the 16-wide buffer fails before the graph even runs. A wider tensor would sit at another address, which the recorded node never reads.
 
 ## Fix directions to weigh
 
@@ -170,8 +302,19 @@ PRs #258 ("guard CUDA graph block table replay") and #263 ("validate request tok
 
 ## Next
 
-- Reproduce it: shrink `max_model_len` to 512, so the buffer has 2 columns. Then let a 500-token prompt generate past 512 tokens with `ignore_eos`, with CUDA graph on and off.
+- Reproduce it: shrink `max_model_len` to 512, so the buffer has 2 columns. Then let a 500-token prompt generate past 512 tokens with `ignore_eos`, with CUDA graph on and off. Write down predictions first: how many tokens are generated before the error, which two numbers appear in the error message, and how long the sequence gets in eager mode.
 - Compare the fix directions and the three PRs.
+
+## Next questions
+
+Harder questions to work through after the reproduction:
+
+1. **Order at startup.** `ModelRunner.__init__` allocates the KV cache before recording the graphs. What would happen the other way round? Would anything raise? Hint: before allocation, `Attention.k_cache` is an empty tensor; see how `forward` handles that ([attention.py L57-L63](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L57-L63)).
+2. **The issue's first claim.** Build a case where the stale columns in `block_tables` really produce a wrong result, or argue it cannot happen. Which condition does the argument rely on, and which code guarantees it?
+3. **Cost of falling back to eager (PR #191).** In a batch of 16, one sequence reaches 4097 tokens. What happens on this step, the next, and the one after? When can the graph be used again? Compared with enforcing `max_model_len`, which is better for the user, and which for throughput?
+4. **Cost of a wider buffer.** Size the buffer for 40960 tokens, the rotary limit. How big does `block_tables` get, and is memory the real cost? What else depends on the buffer's width, and could that slow down decode for short sequences? Does it fully fix #190? And does the issue's "one extra column" fix it, or move the crash from 4097 to 4353 tokens?
+5. **What changes between two steps.** For A, B and C over two consecutive steps with no new block, which of the five input buffers change, and how? What if A grows from 768 to 769 tokens? How does this relate to [#175](https://github.com/GeeeekExplorer/nano-vllm/issues/175), rebuilding the inputs every step, and how could it be optimized?
+6. **Predict the other graphs.** How many nodes do the graphs for batch sizes 2, 4 and 8 have, and around which batch size does each kernel switch? This one can be checked by dumping those graphs too.
 
 ## Questions for later: decode performance
 
