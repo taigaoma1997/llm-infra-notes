@@ -28,7 +28,8 @@ try:
     print(f"torch:    {torch.__version__} (CUDA {torch.version.cuda})")
 except Exception:
     print("torch:    (not installed)")
-for dist in ("triton", "triton-windows", "flash-attn", "transformers", "nano-vllm", "sglang", "vllm"):
+for dist in ("triton", "triton-windows", "flash-attn", "flashinfer-python", "sgl-kernel", "apache-tvm-ffi",
+             "transformers", "nano-vllm", "minisgl", "sglang", "vllm"):
     try:
         print(f"{dist + ':':<10}{metadata.version(dist)}")
     except metadata.PackageNotFoundError:
