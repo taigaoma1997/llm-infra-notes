@@ -175,7 +175,7 @@ flowchart TD
   R -->|"step 2: replay()"| N7
   subgraph G["CUDA graph for batch size 4, recorded once at startup"]
     N7["node #7 · store_kvcache<br/>launch config + recorded addresses"] --> N8["node #8 · attention<br/>launch config + recorded addresses"]
-    N8 --> NL["… 395 nodes in all; the last copies the result"]
+    N8 --> NL["… hundreds of nodes; the last copies the result"]
   end
   N7 -.->|launches| K7["kernel · store_kvcache_kernel<br/>(Triton, written in nano-vllm)"]
   N8 -.->|launches| K8["kernel · flash_fwd_splitkv_kernel<br/>(FlashAttention)"]
@@ -198,17 +198,17 @@ flowchart TD
 
 ### One graph, unpacked
 
-Every node in the graph is the same three things: which kernel, its launch configuration, and its arguments, which are GPU memory addresses. Here is the graph for batch size 4, with two nodes opened up:
+Every node in the graph is the same three things: which kernel, its launch configuration, and its arguments, which are GPU memory addresses. Here is the graph for batch size 1, the one I dumped, with two nodes opened up:
 
 ```
-CUDA graph: graphs[4]              (recorded at startup, kept by the GPU driver; one per batch size 1, 2, 4, 8, 16, …)
+CUDA graph: graphs[1]              (recorded at startup, kept by the GPU driver; one per batch size 1, 2, 4, 8, 16, …)
  │
  ├─ node #0  embedding
  ├─ node #1  rmsnorm
  ├─ …
  ├─ node #7  store_kvcache
  │    ├─ kernel ─────────► store_kvcache_kernel           (nano-vllm's Triton code)
- │    ├─ launch config     <<<4, 128, 0>>>
+ │    ├─ launch config     <<<1, 128, 0>>>
  │    └─ arguments
  │         ├─ slot_mapping ──► [GPU memory] graph buffer slot_mapping
  │         ├─ key, value ────► [GPU memory] graph memory pool: k, v from earlier nodes
@@ -252,7 +252,7 @@ Every decode step
   prepare_decode()              new small tensors, block_tables 3×3      (new address every step)
   run_model()
    ├─ copy the small tensors into the graph buffers (L204-L210)           ← #190 fails here
-   ├─ graphs[4].replay()        the GPU runs all 395 nodes with their recorded addresses
+   ├─ graphs[4].replay()        the GPU runs all of the graph's nodes (395 at batch size 1) with their recorded addresses
    └─ compute_logits(outputs)   eager, outside the graph
 ```
 

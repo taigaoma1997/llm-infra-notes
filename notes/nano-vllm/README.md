@@ -56,7 +56,7 @@ Pitfalls I hit:
 
 - `LLMEngine` silently drops keyword arguments it does not know. An option that only exists in my learning branch (like a KV block cap) is ignored on upstream without an error, so a cross-version test can quietly run a different scenario. Settings that exist in every version, like `gpu_memory_utilization`, are safe.
 - On Windows, `bash` in cmd or PowerShell starts WSL, not Git Bash; this repo's scripts need Git Bash.
-- With torch 2.6 on Windows, `torch.compile` can fail with `PermissionError: [WinError 5]` while renaming a folder in its Triton cache (`%TEMP%\torchinductor_<user>\triton\0\`). On a compile-cache hit, `TritonBundler.read_and_emit` creates the target folder, then moves a temporary folder onto it with `os.replace`, which Windows does not allow. Fixed in torch 2.7 ([pytorch#146481](https://github.com/pytorch/pytorch/pull/146481)). On 2.6, set `TORCHINDUCTOR_BUNDLE_TRITON_INTO_FX_GRAPH_CACHE=0` before importing torch; my launcher does this on Windows.
+- With torch 2.6 on Windows, `torch.compile` can fail with `PermissionError: [WinError 5]` while renaming a folder in its Triton cache (`%TEMP%\torchinductor_<user>\triton\0\`). It happens when the compile cache (`fxgraph\`) has an entry whose Triton kernels are missing from `triton\0\`: `TritonBundler.read_and_emit` creates the target folder, then moves a temporary folder onto it with `os.replace`, which Windows does not allow. From then on, every run fails the same way. Fixed in torch 2.7 ([pytorch#146481](https://github.com/pytorch/pytorch/pull/146481)). On 2.6, setting `TORCHINDUCTOR_BUNDLE_TRITON_INTO_FX_GRAPH_CACHE=0` before importing torch skips that code path (my launcher does this on Windows), and deleting `fxgraph\` repairs the cache itself.
 
 ## Architecture
 
@@ -79,7 +79,7 @@ flowchart LR
 | 01 | What happens to a request between `generate()` and the returned text? | planned |
 | 02 | How does the scheduler choose prefill or decode, and when does it preempt? | planned |
 | 03 | How are KV cache blocks allocated, shared by prefix hash, and freed? | planned |
-| 04 | What does ModelRunner prepare for each step, and where is CUDA Graph used? | planned |
+| 04 | What does ModelRunner prepare for each step, and where is CUDA Graph used? | planned; much of it is already in the [#190 write-up](issues/190-cuda-graph-block-tables.md#background-how-one-decode-step-runs) |
 | 05 | How does tensor parallelism split the model and keep workers in sync? | planned |
 
 ## Issues I reproduced

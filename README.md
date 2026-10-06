@@ -2,8 +2,8 @@
 
 This repo is my public learning log: source-code notes, reproducible experiments, and upstream contributions.
 
-- **Now:** reading nano-vllm and reproducing its open issues.
-- **Next:** mini-sglang, then a first contribution to SGLang.
+- **Now:** reproducing nano-vllm's open issues, and reading mini-sglang.
+- **Next:** a first contribution to SGLang.
 - **Upcoming:** [SGLang Summit 2026](https://www.sglang.io/summit), Nov 12–13 in San Francisco (registered).
 
 ## Highlights
@@ -15,7 +15,7 @@ This repo is my public learning log: source-code notes, reproducible experiments
 | PR | [nano-vllm #280: finish or reject sequences that cannot fit in the KV cache](https://github.com/GeeeekExplorer/nano-vllm/pull/280) (open) |
 | Issue | [nano-vllm #274](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md): reproduced the crash when a request cannot fit in the KV cache, and reported a second path to it as #279 |
 | Issue | [nano-vllm #170](notes/nano-vllm/issues/170-rmsnorm-fp32-residual.md): found why RMSNorm corrupts the residual in fp32, plus a second buggy path the issue missed. Compared my fix with the three open PRs; [#171](https://github.com/GeeeekExplorer/nano-vllm/pull/171) already fixes both, so no PR from me |
-| In progress | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Understood from the code; reproducing next |
+| In progress | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Understood from the code and from the recorded graphs; reproducing next |
 
 ## Progress
 

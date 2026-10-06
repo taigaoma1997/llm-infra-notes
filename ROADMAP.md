@@ -12,7 +12,7 @@ Budget: about 10 hours a week alongside a full-time job. Phases overlap. Dates a
 
 - [x] Run nano-vllm end to end
 - [ ] Notes 01 to 04: request lifecycle, scheduler, block manager and prefix cache, model runner and CUDA Graph
-- [ ] Reproduce two or three open issues and write up each one
+- [x] Reproduce two or three open issues and write up each one: #274 and #170 done, #190 in progress
 - [ ] Fundamentals: KV cache sizing, prefill vs decode, roofline
 
 Done when I can draw a request's path through nano-vllm from memory and explain every stage.
@@ -51,3 +51,4 @@ CUDA C++ in depth, cluster scheduling and Kubernetes, large-scale training. Revi
 - 2026-09-25: Phase 1 on track. One of two or three issues reproduced (#274, fix not started). Notes 01 to 04 not written yet, though the code behind them has been read.
 - 2026-09-29: First upstream PR opened ahead of plan: nano-vllm [#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) fixes #274 and #279 (reported by me). Still one of two or three reproduced issues; notes 01 to 04 still to write.
 - 2026-10-02: Reproduced nano-vllm [#170](https://github.com/GeeeekExplorer/nano-vllm/issues/170), so two issues reproduced. Added [Tunix](https://github.com/google/tunix), Google's post-training library in JAX, to the frameworks to learn.
+- 2026-10-05: Started mini-sglang a month ahead of Phase 2: set up in WSL2 and ran end to end. On nano-vllm, the third issue (#190) is understood, down to what the recorded CUDA graphs contain; reproducing it is next. Notes 01 to 04 still to write, though the #190 write-up already covers much of note 04.
