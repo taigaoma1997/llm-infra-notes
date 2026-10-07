@@ -84,6 +84,18 @@ flowchart LR
 
 Write-ups live in [issues/](issues/). The status of each one is tracked in [CONTRIBUTIONS.md](../../CONTRIBUTIONS.md).
 
+## A pattern across these issues
+
+Each bug I have reproduced so far comes from a limit the code assumes but never enforces. nano-vllm is meant to be small and readable, so it leaves out most input checks that a production engine like vLLM has.
+
+| Issue | Assumed limit | What should have checked it |
+|---|---|---|
+| [#274](issues/274-kv-cache-exhausted-assert.md) | a sequence never outgrows the whole KV cache | the scheduler |
+| [#279](issues/274-kv-cache-exhausted-assert.md#the-failing-cases) | a prompt is never larger than the whole KV cache | `Scheduler.add` |
+| [#190](issues/190-cuda-graph-block-tables.md#why-nothing-catches-it-earlier) | a sequence never grows past `max_model_len`, which sizes the CUDA graph buffers | the scheduler, or the sampling parameters |
+
+When I read the next engine, I will look for limits like these first.
+
 ## Q&A (in Chinese)
 
 The questions I asked while studying each topic, with answers, diagrams and self-checks. These are my study pages, so they are in Chinese.

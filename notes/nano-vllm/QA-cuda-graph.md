@@ -14,8 +14,9 @@
 6. 把缓冲区、CUDA graph 和 kernel 串起来：结构、时间、缓冲区表、四类显存、三种位置信息、空座位算什么
 7. 代码在哪里：一步 decode 的执行路线
 8. 其他
-9. 自测：做过的题和纠正
-10. 下一步要想的问题
+9. 复现和实验：在原版上复现、“多一列”的实验、报错信息怎么读、为什么没人提前检查越界、nano-vllm 是不是没设计好
+10. 自测：做过的题和纠正
+11. 下一步要想的问题
 
 ## 一句话：这个 bug 是什么
 
@@ -788,6 +789,106 @@ run_model()
 
 ---
 
+## 复现和实验（2026-10-06）
+
+### 在原版上复现了 #190
+
+设置：`max_model_len=512`（缓冲区 2 列 = 512 个 token）、prompt 500 个 token、`max_tokens=500`、`ignore_eos`（序列本该长到 1000），开 CUDA graph，跑在没改过的 `bb823b3` 上：
+
+```
+RuntimeError: The expanded size of the tensor (2) must match the existing size (3) at non-singleton dimension 1.  Target sizes: [1, 2].  Tensor sizes: [3]
+```
+
+和预测一致：graph 模式会崩。三个数：batch 里 1 个序列（`[1, …]`），缓冲区每行 2 格，这一步的表要 3 列。
+
+### 实验：issue 建议的“多分配一列”能修好吗？
+
+在 learning 上开试验分支 `try/190-plus-one`，把 `capture_cudagraph` 里的 `max_num_blocks` 加 1，同一个脚本再跑一次：
+
+| 版本 | 缓冲区 | 最多装 | 结果 |
+|---|---|---|---|
+| 原版 | 2 列 | 512 个 token | `(2) must match … (3)`，`Target sizes: [1, 2]. Tensor sizes: [3]` |
+| 多一列 | 3 列 | 768 个 token | `(3) must match … (4)`，`Target sizes: [1, 3]. Tensor sizes: [4]` |
+
+- **结论：修不好，只是把出错位置往后推了一个 block**（从第 513 个 token 推到第 769 个）。序列要长到 1000，加几列都迟早超出——只要没人拦着序列长度，任何固定宽度都不够
+- **实验设计的关键：测试要推过新的边界。** 原来的 `max_tokens=100` 最多长到 600，碰不到 768，同样的实验会让人误以为“修好了”。所以改成了 500
+- **issue 作者为什么会这么建议：** 他看到的报错是 `16 对 17`，只差一列，像个差一位（off-by-one）的错误。真正的问题是序列长度没有上限
+
+### 报错信息 `Target sizes: [1, 2].  Tensor sizes: [3]` 是什么意思？
+
+第 210 行其实做了两件事：
+
+```python
+graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+#  ─────────── ① 先从缓冲区里“框出一块窗口” ───────────     ─── ② 再把数据复制进窗口 ───
+```
+
+1. **框窗口：越界不报错，悄悄截断。** 要框 1 行 × 3 列，可缓冲区只有 2 列，PyTorch 给的是 1 × 2，不报错——和 Python 列表 `[1, 2][:3]` 得到 `[1, 2]` 一样
+2. **复制：形状对不上，这里才报错。** 把 1×3 塞进 1×2，第 1 维 3 对 2 → `RuntimeError`
+
+在 CPU 上用小例子验证过，报错一字不差：
+
+```
+src.shape            = (1, 3)
+buf[:1, :3].shape    = (1, 2)    ← 要 3 列，给了 2 列，没报错
+buf[:1, :100].shape  = (1, 2)
+RuntimeError: The expanded size of the tensor (2) must match the existing size (3) at non-singleton dimension 1.  Target sizes: [1, 2].  Tensor sizes: [3]
+```
+
+| 片段 | 意思 |
+|---|---|
+| `Target sizes: [1, 2]` | ① 框出来的窗口（已经被截断） |
+| `Tensor sizes: [3]` | 要复制进去的 1×3 表。下标赋值时，PyTorch 会先去掉来源**开头长度为 1 的维度**（所以 `[1, 1, 3]` 也能赋给 `[3]`），`[1, 3]` 就变成了 `[3]` |
+| `expanded size (2) … existing size (3) … dimension 1` | 第 1 维（列）：目标要 2，来源有 3 |
+
+issue 里的报错是 `Target sizes: [32, 16]. Tensor sizes: [32, 17]`：开头是 32 个序列，不是 1，所以没被去掉。
+
+**崩溃反而是“好”的结果。** 如果复制也悄悄截断、丢掉第 3 个 block 编号：attention 读到 `context_lens` 是 513，要读 3 个 block，可录好的规则是“每行 2 个”，第 3 个就会读到**下一行**——别的座位的数据。结果是拿别人的 KV 算 attention，不报任何错。这正好呼应 9/29 那条 Learned：不报错的错误最危险。
+
+### `[5, 9, 12]` 这张表是什么时候生成的？为什么没人提前检查越界？
+
+不是提前生成好的，分两层：Python 列表 `seq.block_table` 跟着序列一起长；张量 `block_tables` 每一步现做。拿复现走一遍：
+
+```
+prefill：给 500 个 token 分配 2 个 block      seq.block_table = [b0, b1]，生成 1 个 token → 长度 501
+长度 501 … 512：2 个 block 正好装得下（2 × 256 = 512），列表不变
+长度第一次变成 513 的那一步：
+  ① Scheduler.schedule → may_append：513 % 256 == 1，加一个 block   seq.block_table = [b0, b1, b2]
+  ② prepare_decode → prepare_block_tables：现做张量                  [[b0, b1, b2]]，1 行 3 列
+  ③ run_model 第 210 行：复制进每行 2 列的缓冲区                     → RuntimeError
+```
+
+①②③ 在同一步里，前后只隔几毫秒。三个环节各自都“以为”别人会管：
+
+| 环节 | 代码 | 管什么 | 为什么没拦住 |
+|---|---|---|---|
+| ① 调度器 | [`may_append`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L106-L108) | KV cache 里有没有空 block | 只看有没有空 block，**不知道** graph 缓冲区多宽（那是 `ModelRunner` 的事） |
+| ② 拼表 | [`prepare_block_tables`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L123-L127) | 把列表拼成张量 | 多宽都照拼 |
+| ③ 复制 | [第 210 行](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L210) | 复制进缓冲区 | 切片越界悄悄截断，直到复制才发现 |
+
+**根源是一个没写出来的假设**：缓冲区宽度按 `max_model_len` 算，默认序列不会超过它，可没有任何代码去执行它。宽度在一处定，长度在另一处涨，中间没人对一下。
+
+检查可以放在两个地方（“检查放在哪，和检查什么一样重要”）：
+
+- **① 之前**：长到 `max_model_len` 就正常结束，返回 `finish_reason="length"`（vLLM 就这样做，也是我在 #280 里处理 KV cache 容量的写法）→ 表永远不会变宽，**从根上修**
+- **③ 之前**：复制前比较宽度，装不下就这一步改用 eager（PR #191）→ 不崩了，但序列照样长过 `max_model_len`
+
+### nano-vllm 是不是一开始就没设计好？
+
+不完全是。它的目标是用一千多行代码把 vLLM 的核心想法写得读得懂，代价是省掉了大部分“护栏”（输入检查、上限执行）。生产级的 vLLM 会在请求进来时检查 prompt 长度，长到 `max_model_len` 就结束。所以是**为了简洁牺牲了健壮性**——这也是它好学、又容易挖出 bug 的原因。
+
+我做过的几个 issue 其实是同一类：**一个上限被默认了，却没人执行**。
+
+| issue | 默认的上限 | 谁没检查 |
+|---|---|---|
+| #274 | 序列不会超过 KV cache 的总容量 | 调度器 |
+| #279 | prompt 不会比整个 KV cache 还大 | `add()` |
+| #190 | 序列不会超过 `max_model_len`（缓冲区宽度按它定） | 调度器、`SamplingParams` |
+
+以后读别的引擎，可以专门去找“默认了、但没执行”的上限。
+
+---
+
 ## 自测：做过的题和纠正（2026-10-05）
 
 理解完之后让 Claude 出题检查。✅ 对 / ⚠️ 部分对 / ❌ 错，“当时的误区”是我自己答错或答偏的地方。
@@ -854,18 +955,17 @@ run_model()
 
 ## 下一步要想的问题（Next questions）
 
-### 复现前先补完预测（第一轮第 6 题）
+### 第一轮第 6 题：预测和结果
 
-我的复现脚本：`max_model_len=512`（缓冲区 2 列）、prompt 500 个 token、`max_tokens=100`、`ignore_eos=True`。
-
-- 开 CUDA graph：报错时**已经生成了几个 token**？报错信息 `(…) must match the existing size (…)` 的两个数字？
-- eager：最后序列多长？为什么不报错？
+- 我的预测：graph 模式会报错；eager 能跑通
+- 结果（2026-10-06，`max_tokens` 改成了 500）：graph 模式报错 `(2) must match … (3)`，`Target sizes: [1, 2]`。详见上面“复现和实验”
+- 还没确认：报错前已经生成了几个 token（learning 版的 trace 里看 `STEP`；按推算是长度第一次到 513 的那一步）；eager 模式最后序列多长
 
 ### 难题（暂时太难，先放着）
 
 1. **顺序题**：`ModelRunner.__init__` 先 `allocate_kv_cache()` 再 `capture_cudagraph()`。反过来会怎样？会报错吗？（提示：`attention.py` 第 57-63 行，KV cache 开好之前 `self.k_cache` 是什么，`forward` 怎么处理它）
 2. **判断 issue 的说法**：作者说“缓冲区每步不清空是正确性问题”。构造一个旧数据**真的**导致算错的情况，或论证不可能；说明依赖哪个条件、由哪段代码保证
 3. **修法的代价（一）**：PR #191 装不下就改用 eager。16 个序列里 1 个长到 4097：这一步、下一步、下下一步各怎样？什么时候才能重新用上 graph？和“强制执行 `max_model_len`”比，哪个对用户友好、哪个对吞吐友好？
-4. **修法的代价（二）**：一开始就把缓冲区做宽到 40960 个 token（位置编码上限）。缓冲区变多大、显存是真正的代价吗？还有什么会跟着变（回想“CUDA graph 和 block 数的关系”）、对**短序列**的 decode 速度可能有什么影响？能彻底修好 #190 吗？顺带：issue 建议的“多分配一列”能修好，还是只把出错位置从 4097 推到 4353？
+4. **修法的代价（二）**：一开始就把缓冲区做宽到 40960 个 token（位置编码上限）。缓冲区变多大、显存是真正的代价吗？还有什么会跟着变（回想“CUDA graph 和 block 数的关系”）、对**短序列**的 decode 速度可能有什么影响？能彻底修好 #190 吗？（issue 建议的“多分配一列”已经用实验回答了：只把出错位置往后推一个 block，见“复现和实验”）
 5. **相邻两步之间什么变了**：A、B、C 连续两步，谁都没跨进新 block，5 个输入缓冲区里哪些值变了、怎么变，哪些没变？A 从 768 长到 769 时呢？这和 #175（每步重新拼张量）有什么关系，能怎么优化？
 6. **预测题（可以跑实验验证）**：batch 2、4、8 的 graph 各有多少个节点？哪些 kernel 在哪个 batch size 附近变？验证：把这几个 batch size 的 graph 也导出来数一数
