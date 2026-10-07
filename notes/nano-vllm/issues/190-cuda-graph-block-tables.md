@@ -1,9 +1,9 @@
 # [nano-vllm #190] CUDA graph replay fails once a sequence grows past max_model_len
 
-- Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/190 · Same bug, reported earlier: [#106](https://github.com/GeeeekExplorer/nano-vllm/issues/106) · PRs that mention it: [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) (open), [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258) and [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263) (closed without merging)
-- Status: investigating. Reproduced on unmodified upstream, and measured that the fix the issue suggests (one extra column) only moves the crash.
-- Commit read: `bb823b3`, unmodified upstream
-- Written: 2026-10-03 · Updated: 2026-10-06
+- Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/190 · Same bug, reported earlier: [#106](https://github.com/GeeeekExplorer/nano-vllm/issues/106) · Open PRs: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) (fixes the root cause, but does not link this issue) and [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) (avoids the crash) · Closed without merging: [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258), [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263)
+- Status: studied. Reproduced on unmodified upstream, found why nothing catches it earlier, and tested the two open PRs with the same script. No PR from me so far: #270 already fixes the root cause.
+- Commit read: `bb823b3`, unmodified upstream; the PRs at their heads, #270 `b8996b2` and #191 `b386ae2`
+- Written: 2026-10-03 · Updated: 2026-10-07
 - Study Q&A (Chinese), with every question I asked along the way: [QA-cuda-graph.md](../QA-cuda-graph.md)
 - Side quest: while I was recording the graphs, `torch.compile` failed in the warmup before capture with `PermissionError: [WinError 5]`. That is a PyTorch 2.6 bug on Windows, unrelated to #190. I traced it and documented it in triton-windows's README: [PR #56](https://github.com/triton-lang/triton-windows/pull/56), [write-up](../../triton-windows/issues/56-pytorch-2.6-os-replace.md)
 
@@ -15,7 +15,7 @@
 - **Why:** CUDA graph replays GPU work recorded at startup, and that work reads fixed buffers. The `block_tables` buffer has `max_model_len / 256` = 16 columns, so it fits sequences of up to 4096 tokens. Nothing stops a sequence from growing longer: neither the scheduler nor `SamplingParams` checks `max_model_len`. A 4097-token sequence needs a 17th column, and the copy into the buffer fails.
 - **Only the CUDA graph path is affected.** Prefill, `enforce_eager=True`, and batches of more than 512 sequences build their tensors fresh every step. `example.py` sets `enforce_eager=True`, so it never hits this.
 - **Reproduced** on unmodified upstream. The fix the issue suggests, one extra buffer column, only moves the crash by one block ([Reproduction](#reproduction)). Nothing checks the table's width before the copy; the limit the buffer was sized for is assumed but never enforced ([Why nothing catches it earlier](#why-nothing-catches-it-earlier)).
-- **Next:** compare with eager mode and with PR #191, then weigh the fix directions.
+- **The open PRs, tested on the same script:** [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) fixes the root cause by rejecting any request whose prompt plus `max_tokens` exceeds `max_model_len`, but one bad request fails the whole call. [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) runs a step eagerly when the table would not fit: no crash, but the sequence grows past `max_model_len`. Details: [Fixes compared](#fixes-compared-the-open-prs-tested). What I take from it: [Thoughts](#thoughts).
 
 ## What I learned
 
@@ -26,6 +26,11 @@
 - The issue's suggested fix (add one extra column) does not fix it  -> This is not the root cause, as long as we did not check the length, there wll be error.  
 - Three steps: a block is added, the table is rebuilt, then copied into the graph buffer -> the first two do not check size, leads to copy error in third step. 
 - Seems like nano-vllm has many default size limits that are assumed but have not been enforced ( #274, #279, #190) -> Not a problem for simplicity, but good for learning. 
+- Fix in #270 -> it checks prompt + max_tokens <= max_model_len, so stop the request before the add_request, solve this issue from the begining, but will block the whole batch. 
+- Fix in #191 -> use the eager mode, did not change the logic, and model will ultimate broke when reaching the limit of RoPE! | also, the second condiction is not useful as it will always be skipped. 
+- In #191, need to be more carefully on CPU and GPU sychronization.  
+- Compared multiple PR and their solution. 
+- My insights: a good pr should not just work, but also need to design from a higher level, think of the root cause, the cost of certain operations, etc. 
 
 ## Background: how one decode step runs
 
@@ -138,7 +143,7 @@ Within one decode step, three pieces of code touch the table, and each one assum
 | 2 | [`prepare_block_tables`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L123-L127) | builds this step's table, padded to the longest row | it builds whatever width the lists need |
 | 3 | [`run_model` L210](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L210) | copies the table into the buffer | slicing past the end of a tensor clips silently (`buf[:1, :3]` on a 2-wide buffer is 1×2), so only the copy itself fails |
 
-All three happen in the same step, milliseconds apart. The buffer's width comes from `max_model_len`, on the assumption that no sequence grows past it, but nothing enforces that. A check could live before step 1: finish the sequence at `max_model_len`, as vLLM does with `finish_reason="length"`, so the table never outgrows the buffer. Or before step 3: fall back to eager, as PR #191 does, which avoids the crash but still lets the sequence grow past `max_model_len`.
+All three happen in the same step, milliseconds apart. The buffer's width comes from `max_model_len`, on the assumption that no sequence grows past it, but nothing enforces that. A check could live before step 1: finish the sequence at `max_model_len`, as vLLM does with `finish_reason="length"`, so the table never outgrows the buffer. Or before step 3: fall back to eager, as PR #191 does, which avoids the crash but still lets the sequence grow past `max_model_len`. Both are tested under [Fixes compared](#fixes-compared-the-open-prs-tested).
 
 The crash is the lucky outcome. If the copy also clipped silently, attention would need a third block number but find only two per row, and would read into the next seat's row: it would compute with another sequence's KV cache, without any error.
 
@@ -159,6 +164,89 @@ The crash is the lucky outcome. If the copy also clipped silently, attention wou
 Both fail the moment the table needs one more column than the buffer has. The extra column moves the crash by one block, from 513 tokens to 769, and any fixed width is outgrown as long as nothing stops the sequence. The test had to push past the new boundary: with `max_tokens=100` the sequence stops at 600 tokens, never reaches 768, and the same run would have suggested that the fix works.
 
 In the message, `Target sizes` is the slice of the buffer, already clipped to the buffer's width, and `Tensor sizes: [3]` is this step's 1×3 table: PyTorch drops leading dimensions of size 1 from the source before an indexed copy.
+
+## Fixes compared: the open PRs, tested
+
+| PR | Approach | Status (2026-10-07) | Fixes #190? |
+|---|---|---|---|
+| [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) | Reject a request in `add_request` when prompt + `max_tokens` > `max_model_len` (`ValueError`); adds 10 CPU-only tests | open, mergeable, no review yet | **Yes, at the root**: no sequence can outgrow the buffer |
+| [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) | Before each decode step, run eagerly if the table would not fit; one extra buffer column; clear the buffer before each copy | open, conflicts with main | Avoids the crash, but sequences still grow past `max_model_len` |
+| [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258) | Same idea as #191 | closed without merging | — |
+| [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263) | First version of #270, closed by its author the day #270 was opened | closed without merging | — |
+
+#270 never mentions #190, so searching the PRs for "190" does not find it; I found it by searching for `max_model_len`. A maintainer reading #190 would not know about it either.
+
+### The same script on four versions
+
+Same setup as [Reproduction](#reproduction): `max_model_len=512`, a 500-token prompt, `max_tokens=500`, `ignore_eos`, CUDA graph on. Each PR was fetched from `pull/<N>/head` and run from its own worktree.
+
+| Version | Buffer | Result |
+|---|---|---|
+| upstream `bb823b3` | 2 columns | crashes at 513 tokens: `(2) must match … (3)` |
+| one extra column | 3 columns | crashes at 769 tokens: `(3) must match … (4)` |
+| PR #270 | 2 columns | rejected before the first step, no tokens generated: `ValueError: request requires 1000 tokens, exceeding max_model_len=512` |
+| PR #191 | 3 columns | no crash: 500 tokens generated, so the sequence reached 1000 tokens, past `max_model_len=512` |
+
+### PR #270: reject the request when it comes in
+
+The fix is one line in `add_request` ([llm_engine.py L47](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L47)), plus the check in [`SamplingParams.validate_request_length`](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/sampling_params.py#L19-L27):
+
+```python
+sampling_params.validate_request_length(len(prompt), self.max_model_len)   # new
+seq = Sequence(prompt, sampling_params)
+self.scheduler.add(seq)
+```
+
+Why it fixes #190: a sequence is at most prompt + `max_tokens` ≤ `max_model_len` tokens long, so it needs at most `ceil(max_model_len / 256)` blocks, which is exactly the buffer's width.
+
+Problems I see in the code (the second is not tested yet):
+
+1. **One bad request fails the whole call.** `generate()` raises, so the valid requests in the same call get nothing. This is the same weakness I found in PR #277's fix for #274.
+2. **Requests added before the bad one stay in the engine.** `generate()` adds requests one at a time ([L72](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L72)). For `generate([A, B, C])` with C too long, A and B are already queued when C raises. The next `generate([D])` runs A, B and D, and returns three results for one prompt, because it collects every finished sequence by ID ([L87-L90](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L87-L90)).
+3. **Strict.** It rejects on the worst case, even if the model would stop at EOS long before. vLLM's OpenAI-compatible server rejects such requests too, so this is a trade-off rather than a bug.
+
+### PR #191: run the step eagerly when the table does not fit
+
+Running it today took one detour, unrelated to the fix. The PR is based on `2f21442` (2025-11-04). With transformers 5.16, the model config's `rope_scaling` comes back as a dict (`{'rope_theta': 1000000, 'rope_type': 'default'}`), and the old `get_rope`, cached with `@lru_cache`, cannot hash it: `TypeError: unhashable type: 'dict'`. Upstream fixed that in [`8d63a98`](https://github.com/GeeeekExplorer/nano-vllm/commit/8d63a98c03805e54e9a422fd83fff7a4780c17dc) (2026-04-14), which also rewrote much of `model_runner.py`; that is probably why #191 now conflicts. #191 does not touch the two rope files, so I took them from `8d63a98` and kept the rest of the PR as it is.
+
+The fix is a check before each decode step, in [`can_use_decode_graph`](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L189-L199):
+
+```python
+if int(context.context_lens.max().item()) > self.config.max_seq_len_to_capture:   # ①
+    return False
+if context.block_tables.size(1) > self.graph_vars["block_tables"].size(1):        # ②
+    return False
+```
+
+`max_seq_len_to_capture` is a new setting that defaults to `max_model_len`; older vLLM versions had a setting with the same name and meaning. The buffer becomes `ceil(max_seq_len_to_capture / 256) + 1` columns wide ([L234](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L234)), 3 in my run.
+
+- **① always fires first, so ② never decides.** If every sequence is at most 512 tokens long, each needs at most `ceil(512 / 256) = 2` blocks, so the table is at most 2 columns wide, narrower than the 3-column buffer. In my run, the eager steps started at 513 tokens.
+- **The extra column is never used.** On graph steps each sequence has at most 2 blocks, so the third column only ever holds the `-1` from `fill_(-1)`.
+- **② is the check that matters, and it is free.** It is exactly the condition under which the copy fails, so it alone prevents the crash. A tensor's shape is known on the CPU, so it costs nothing to read.
+- **① costs a CPU–GPU sync on every step**, including the steps that use the graph. `context_lens` is on the GPU, so `.item()` makes the CPU wait until the GPU has finished the queued copies and the `max`, and then copies the result back. Meanwhile the GPU sits idle until the CPU queues the replay. In nano-vllm the cost is small, because each step already syncs once when it reads the sampled tokens ([L225](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L225)). In an engine that prepares the next step on the CPU while the GPU runs the current one, such as SGLang with its overlap scheduler, it would cancel that overlap. And the value is already on the CPU: `prepare_decode` builds `context_lens` from `len(seq)` in a Python list ([L172](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L172)).
+- **No crash does not mean correct.** The sequence went past `max_model_len`, and the output was still fine only because I had set 512 low on purpose. The hard limit is the rotary embedding table, 40960 positions for Qwen3-0.6B ([rotary_embedding.py L44](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/layers/rotary_embedding.py#L44)). With `max_model_len` set to 40960, #191 would let a sequence index past that table. It moves the failure from `max_model_len` to `max_position_embeddings`.
+
+### Side by side
+
+| Fix | Where it checks | Crash? | Can a sequence pass `max_model_len`? | Who pays for one bad request | Extra cost per step |
+|---|---|---|---|---|---|
+| One extra column (the issue's suggestion) | nowhere | yes, one block later | yes | the whole batch (crash) | none |
+| PR #191 | before each decode step | no | yes, up to the rotary limit | open: [next question 3](#next-questions) | a CPU–GPU sync; eager steps past the limit |
+| PR #270 | when a request comes in | no | no | the whole `generate()` call, plus leftover queued requests | none |
+| Two checks (not written) | when a request comes in (reject only that one) and after each step (finish at `max_model_len` with `finish_reason="length"`) | no | no | only that request | none: one integer comparison on the CPU |
+
+The last row is how I would fix it, in the same style as my PR #280 for the KV cache limit. #270 already fixes the root cause, so I have not written it.
+
+## Thoughts
+
+What this issue taught me beyond the bug itself:
+
+1. **Enforce a limit where requests come in and grow, not where it finally breaks.** The crash happens in `ModelRunner`, at L210, but the limit is about the request: whether it may come in, and when it must stop. Fixes at the crash site, a wider buffer or an eager fallback, leave the limit unenforced and move the failure somewhere else. Two choke points cover it: `Scheduler.add` when a request comes in, and `Scheduler.postprocess` after each new token. These are the same two places my PR #280 uses for the KV cache limit.
+2. **Every dimension of a CUDA graph buffer needs a guard.** A recorded graph has fixed shapes. nano-vllm guards the batch dimension: more than 512 sequences run eagerly. It does not guard the table's width. When I read another engine's CUDA graph code, I can list each buffer dimension and look for what keeps it in bounds.
+3. **Decide who pays for one bad request.** Crashing, raising from `generate()` as #270 does, and finishing only that request are three different answers. Only the last keeps the other requests' results. The same question came up with #274 and PR #277.
+4. **A check on the hot path should read data that is already on the CPU.** Shapes and Python lists are free; `.item()` on a GPU tensor is a sync. When two checks overlap, keep the one that matches the failure exactly, ② in #191, and drop the other.
+5. **Test a fix past its own new boundary, and do not take "no crash" as proof.** The extra column passes any test that stops before 768 tokens. #191 runs my reproduction cleanly, but only because the limit it ignores was set low; the next limit is the rotary table.
+6. **Search for existing fixes by mechanism, not only by issue number.** #270 never mentions #190. And an old PR can fail today for reasons unrelated to its fix, as #191 did after the transformers change, so I separate "does the fix work" from "does the PR's base still run".
 
 ## Inside a recorded graph
 
@@ -348,20 +436,13 @@ Three kinds of "where" are easy to confuse:
 
 So #190, in these terms: node #8 was recorded with "read `block_tables`, 16 entries per row". A sequence that needs a 17th block produces a table 17 entries wide, and the copy into the 16-wide buffer fails before the graph even runs. A wider tensor would sit at another address, which the recorded node never reads.
 
-## Fix directions to weigh
-
-1. Make the buffer wider from the start. How wide is enough?
-2. When the table does not fit, run that step eagerly. PR #191 does this, and also clears the buffer.
-3. Enforce `max_model_len`: stop or reject sequences at the limit, so the table never outgrows the buffer.
-
-PRs #258 ("guard CUDA graph block table replay") and #263 ("validate request token limits") also mention this issue. Both were closed without being merged; their code can still be read for ideas.
-
 ## Next
 
 - Run the same reproduction with `enforce_eager=True`: no error expected, but how long does the sequence get?
 - Use the learning branch's trace to see the exact step that fails.
-- Test PR #191 with the same script: does it stop the crash, and does the sequence still grow past `max_model_len`?
-- Weigh the fix directions.
+- PR #270: test the boundary (a 500-token prompt with `max_tokens` 12, then 13) and the leftover-requests problem.
+- Measure the cost of the eager fallback itself: generate the same number of tokens once all on the graph and once mostly eager.
+- Maybe comment on #270 that it also fixes #190, with this reproduction, and mention the leftover requests.
 
 ## Next questions
 
@@ -369,7 +450,7 @@ Harder questions to work through after the reproduction:
 
 1. **Order at startup.** `ModelRunner.__init__` allocates the KV cache before recording the graphs. What would happen the other way round? Would anything raise? Hint: before allocation, `Attention.k_cache` is an empty tensor; see how `forward` handles that ([attention.py L57-L63](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L57-L63)).
 2. **The issue's first claim.** Build a case where the stale columns in `block_tables` really produce a wrong result, or argue it cannot happen. Which condition does the argument rely on, and which code guarantees it?
-3. **Cost of falling back to eager (PR #191).** In a batch of 16, one sequence reaches 4097 tokens. What happens on this step, the next, and the one after? When can the graph be used again? Compared with enforcing `max_model_len`, which is better for the user, and which for throughput?
+3. **Cost of falling back to eager (PR #191).** In a batch of 16, one sequence reaches 4097 tokens. What happens on this step, the next, and the one after? When can the graph be used again? Compared with enforcing `max_model_len`, which is better for the user, and which for throughput? Hint: #191's check is under [Fixes compared](#pr-191-run-the-step-eagerly-when-the-table-does-not-fit); what does ① compare across the batch?
 4. **Cost of a wider buffer.** Size the buffer for 40960 tokens, the rotary limit. How big does `block_tables` get, and is memory the real cost? What else depends on the buffer's width, and could that slow down decode for short sequences? Does it fully fix #190? (The issue's "one extra column" does not: it only moves the crash, see [Reproduction](#reproduction).)
 5. **What changes between two steps.** For A, B and C over two consecutive steps with no new block, which of the five input buffers change, and how? What if A grows from 768 to 769 tokens? How does this relate to [#175](https://github.com/GeeeekExplorer/nano-vllm/issues/175), rebuilding the inputs every step, and how could it be optimized?
 6. **Predict the other graphs.** How many nodes do the graphs for batch sizes 2, 4 and 8 have, and around which batch size does each kernel switch? This one can be checked by dumping those graphs too.

@@ -16,7 +16,7 @@ This repo is my public learning log: source-code notes, reproducible experiments
 | PR | [nano-vllm #280: finish or reject sequences that cannot fit in the KV cache](https://github.com/GeeeekExplorer/nano-vllm/pull/280) (open) |
 | Issue | [nano-vllm #274](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md): reproduced the crash when a request cannot fit in the KV cache, and reported a second path to it as #279 |
 | Issue | [nano-vllm #170](notes/nano-vllm/issues/170-rmsnorm-fp32-residual.md): found why RMSNorm corrupts the residual in fp32, plus a second buggy path the issue missed. Compared my fix with the three open PRs; [#171](https://github.com/GeeeekExplorer/nano-vllm/pull/171) already fixes both, so no PR from me |
-| In progress | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Reproduced on upstream, and measured that the fix the issue suggests only moves the crash; comparing fixes next |
+| Issue | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Reproduced on upstream, showed that the fix the issue suggests only moves the crash, and tested the two open PRs on the same script: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) fixes the root cause, so no PR from me so far |
 
 ## Progress
 
@@ -38,7 +38,7 @@ Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRI
 
 <!-- Newest first, one line each, linked to the weekly update. Keep the last five. -->
 
-- **2026-10-05** Started mini-sglang: set it up in WSL2 on Windows and ran it end to end. Looked inside nano-vllm's recorded CUDA graphs for #190. Opened a docs PR to triton-windows (#56): [update](updates/2026/2026-10-05.md)
+- **2026-10-05** Started mini-sglang: set it up in WSL2 on Windows and ran it end to end. Looked inside nano-vllm's recorded CUDA graphs for #190, reproduced it, and tested the open PRs that fix it. Opened a docs PR to triton-windows (#56): [update](updates/2026/2026-10-05.md)
 - **2026-09-29** Fixed nano-vllm #274, reported #279, opened my first upstream PR (#280), reproduced #170 and compared its fixes, started #190: [update](updates/2026/2026-09-29.md)
 - **2026-09-25** Sorted nano-vllm's open issues and reproduced #274: [update](updates/2026/2026-09-25.md)
 - **2026-09-24** Started this repo and wrote down what I did before it: [update](updates/2026/2026-09-24-backfill.md)

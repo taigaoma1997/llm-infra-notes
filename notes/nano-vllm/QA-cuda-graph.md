@@ -15,8 +15,9 @@
 7. 代码在哪里：一步 decode 的执行路线
 8. 其他
 9. 复现和实验：在原版上复现、“多一列”的实验、报错信息怎么读、为什么没人提前检查越界、nano-vllm 是不是没设计好
-10. 自测：做过的题和纠正
-11. 下一步要想的问题
+10. 已有的 PR：有哪些、四个版本实测、#270 请求进来时就拒绝、#191 改走 eager（①② 是否重复、多一列有没有用、两个上限、`.item()` 的代价）、几种修法对比
+11. 自测：做过的题和纠正
+12. 下一步要想的问题
 
 ## 一句话：这个 bug 是什么
 
@@ -889,6 +890,190 @@ prefill：给 500 个 token 分配 2 个 block      seq.block_table = [b0, b1]�
 
 ---
 
+## 已有的 PR：对比和实测（2026-10-07）
+
+### 有哪些 PR 在修 #190？
+
+| PR | 作者 · 时间 | 状态（2026-10-07） | 做法 | 修好 #190 了吗 |
+|---|---|---|---|---|
+| [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) | Casten-Wang · 2026-09-06 | open，可以直接合并，0 条评论 | 请求进来时检查 `prompt + max_tokens ≤ max_model_len`，不满足就抛 `ValueError`；附 10 个 CPU 测试 | **修好了，从根上**：不让超长的请求进来 |
+| [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) | ilrewrite · 2026-03-24 | open，和现在的 main 有冲突 | 每步 decode 前检查，装不下就这一步改用 eager；缓冲区多加一列；复制前先 `fill_(-1)` | 只修了症状：不崩了，但序列照样长过 `max_model_len` |
+| [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258) | gcomfident-crypto · 2026-08-26 | 关闭，没合并 | 和 #191 同一个思路 | — |
+| [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263) | Casten-Wang · 2026-09-01 | 作者自己关了，同一天开了 #270 | #270 的第一版 | — |
+| [#253](https://github.com/GeeeekExplorer/nano-vllm/pull/253) | — | open | 性能优化 | 没有，正文写明不包括 #190 |
+| [#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) | 我 | open | 处理 KV cache 容量（#274、#279） | 没有，正文写了 #190 不在范围内 |
+
+**#270 的正文没有提 #190**，所以按 “190” 搜 PR 搜不到它（第一次找的时候就漏了），按 `max_model_len` 搜才找到。教训：找已有的修复，要按**机制的关键词**搜（`max_model_len`、`block_tables`），不能只搜 issue 编号。维护者看 #190 时也不会知道有这个 PR。
+
+### 实测：同一个脚本跑四个版本
+
+设置和“复现和实验”一样：`max_model_len=512`（原版缓冲区 2 列）、prompt 500 个 token、`max_tokens=500`、`ignore_eos`、开 CUDA graph。PR 的代码用 `git fetch origin pull/<N>/head:pr-<N>` 拉下来，单独开一个 worktree 跑。
+
+| 版本 | 缓冲区 | 结果 |
+|---|---|---|
+| 原版 `bb823b3` | 2 列 | 长度到 513 时崩：`(2) must match … (3)` |
+| 多一列（自己的试验分支） | 3 列 | 长度到 769 时崩：`(3) must match … (4)` |
+| #270 | 2 列 | 请求一进来就被拒，一个 token 都没生成：`ValueError: request requires 1000 tokens, exceeding max_model_len=512` |
+| #191 | 3 列 | 不崩，生成了 500 个 token，序列长到 1000，**超过了 `max_model_len=512`** |
+
+#191 第一次没跑起来（`TypeError: unhashable type: 'dict'`），原因和它的修法无关，见下面。
+
+### #270：请求进来时就拒绝
+
+改动就是 `add_request` 里多了一行（[`llm_engine.py` 第 47 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L47)），检查写在 [`sampling_params.py`](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/sampling_params.py#L19-L27) 里：
+
+```python
+def add_request(self, prompt, sampling_params):
+    if isinstance(prompt, str):
+        prompt = self.tokenizer.encode(prompt)
+    sampling_params.validate_request_length(len(prompt), self.max_model_len)   # 新加的
+    seq = Sequence(prompt, sampling_params)
+    self.scheduler.add(seq)
+```
+
+为什么这样就修好了：
+
+```
+序列最长 = prompt + max_tokens ≤ max_model_len
+→ block 数 ≤ ceil(max_model_len / 256) = 缓冲区宽度
+→ 第 210 行永远装得下
+```
+
+实测时报错发生在 `add_request`，还没进 `generate` 的 `while` 循环，所以这个请求一步都没算（模型加载、录 graph 在 `LLM(...)` 初始化时已经做完了）。
+
+读代码看出来的问题（第 2 条还没跑过）：
+
+1. **一个请求不合格，整批都失败**：`generate()` 直接抛异常，同一批里合格的请求也拿不到结果。和我批评 #277 的第一点一样
+2. **中途抛错，前面的请求会留在引擎里**：`generate` 是一个一个加请求的（[第 72 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L72)）
+
+   ```
+   generate([A, B, C])，C 太长
+     A → 进了 scheduler.waiting
+     B → 进了 scheduler.waiting
+     C → ValueError 抛出去；A、B 还留在引擎里
+   接着 generate([D]) → A、B、D 都会被执行，1 个 prompt 却返回 3 个结果
+   ```
+
+   因为[第 87、90 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L87-L90)把所有结束了的序列按 seq_id 收集起来，不分是哪次调用加进来的
+3. **检查比较严**：按 `max_tokens` 全部用完的最坏情况来查，哪怕模型可能早早生成 EOS 停下，也会被拒。vLLM 的 OpenAI 接口也这样拒绝，所以算取舍，不算错
+4. **没有链接 #190**（见上）
+
+### #191 为什么第一次跑不起来：旧代码碰上新版 transformers
+
+```
+config.json：               "rope_scaling": null, "rope_theta": 1000000
+transformers 5.16.1 读进来： rope_scaling = {'rope_theta': 1000000, 'rope_type': 'default'}
+                            （config 上的 rope_theta 属性没了，挪进了这个 dict）
+#191 qwen3.py 第 135 行：    rope_scaling=getattr(config, "rope_scaling", None)   → 拿到 dict
+→ get_rope(..., rope_scaling=dict)
+→ get_rope 上有 @lru_cache(1)，要用参数做缓存的 key，dict 不能 hash
+→ TypeError: unhashable type: 'dict'
+  （就算过了这一步，下一行 assert rope_scaling is None 也会失败）
+```
+
+代码：[`qwen3.py` 第 135 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/models/qwen3.py#L135)、[`get_rope`](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/layers/rotary_embedding.py#L51-L59)。上游在 [`8d63a98`](https://github.com/GeeeekExplorer/nano-vllm/commit/8d63a98c03805e54e9a422fd83fff7a4780c17dc)（2026-04-14，“support chunked prefill and fix minor bug”）里修了：`qwen3.py` 从 dict 里取 `rope_theta`，`get_rope` 不再收 `rope_scaling`。#191 基于更早的 `2f21442`（2025-11-04），所以还带着这个问题。`8d63a98` 还改了 35 行 `model_runner.py`，#191 也改这个文件，这很可能就是它和 main 冲突的原因。
+
+怎么跑起来：#191 只改了 `config.py` 和 `model_runner.py`，不碰这两个 rope 文件，所以只把它们换成 `8d63a98` 的版本（本地临时改动）：
+
+```
+git -C <pr-191 的 worktree> checkout 8d63a98 -- nanovllm/layers/rotary_embedding.py nanovllm/models/qwen3.py
+```
+
+这样测的是 #191 加上 chunked prefill 之前的旧调度器，不是它合进现在 main 之后的样子。#190 在旧代码上就存在（issue 是 3 月提的），decode 这条路也基本没变，所以用来验证 #191 的修法仍然有效。
+
+### #191：装不下就改用 eager
+
+[`can_use_decode_graph`](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L189-L199) 在每一步决定用不用 graph：
+
+```python
+def can_use_decode_graph(self, input_ids, is_prefill):
+    if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        return False
+    context = get_context()
+    if context.context_lens is None or context.block_tables is None:
+        return False
+    if int(context.context_lens.max().item()) > self.config.max_seq_len_to_capture:   # ①
+        return False
+    if context.block_tables.size(1) > self.graph_vars["block_tables"].size(1):        # ②
+        return False
+    return True
+```
+
+`max_seq_len_to_capture` 是 #191 新加的配置，默认等于 `max_model_len`（名字来自 vLLM 旧版的同名配置，意思一样）。缓冲区宽度 = `ceil(max_seq_len_to_capture / 256) + 1`（[第 234 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L234)），这次是 3 列。
+
+**什么时候走 eager？** ✅（我自己答的）prefill；强制 eager；batch 超过 512 个序列（decode 时每个序列送 1 个 token，`input_ids.size(0)` 就是序列数，512 是录过 graph 的最大 batch）；① 这一批最长序列的**当前长度**超过 `max_seq_len_to_capture`（每步都查，不是请求进来时查一次）；② 这一步的表比缓冲区宽。这次是 ① 先触发，从长度 513 那一步开始。
+
+**① 和 ② 是不是重复了？** 是。只要有 ①，② 就永远不会先触发：
+
+```
+① 通过  ⇔  这一批每个序列长度 ≤ 512
+每个序列的 block 数 = ceil(长度 / 256)    （may_append 只在 len % 256 == 1 时加一个 block）
+                  ≤ ceil(512 / 256) = 2
+表的列数 = 最长那行的 block 数 ≤ 2 < 缓冲区 3 列
+→ ② 一定通过
+```
+
+反过来，真正需要的是 ②：它就是崩溃的条件本身（第 210 行要把多少列复制进几列），光靠它就能防止崩溃；而且不花代价——`block_tables.size(1)` 是张量的形状，形状记在 CPU 上，不用问 GPU。
+
+**多加的那一列用到过吗？** ✅（我自己答的）没有。graph 模式下序列长度 ≤ 512，最多 2 个 block，第 3 列一直是 `fill_(-1)` 填的 -1；attention 只读 `ceil(context_len / 256)` 个 block，从来读不到它。有了 ①，② 和多加的一列都是多余的。
+
+**不崩，但超过了哪个上限？** 有两个上限，别混：
+
+| 上限 | 这次的值 | 序列超过了吗 | 超过之后 |
+|---|---|---|---|
+| `max_model_len` | 512（故意设小的） | **超过了**，长到 1000 | 原版在第 210 行崩；#191 改走 eager，继续生成 |
+| 模型的位置上限 `max_position_embeddings` | 40960 | 没有 | RoPE 表 `cos_sin_cache` 只有 40960 行，超过就越界索引（[`rotary_embedding.py` 第 44 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/layers/rotary_embedding.py#L44)） |
+
+这次生成的内容没问题，因为 1000 远小于 40960。但 `max_model_len = min(用户设的值, 40960)`，如果用户把它设成 40960，#191 会让序列长过 40960、越界读 RoPE 表。所以 #191 没有消除出错的可能，只是把它从 `max_model_len` 推到了 `max_position_embeddings`。
+
+**输出里那段 dynamo 警告**：`torch._dynamo hit config.cache_size_limit (8)`，`function: 'rms_forward'`。只是警告，不影响结果：`rms_forward` 被 `torch.compile` 重新编译了 8 次，到了上限，之后不再编译，直接用未编译的版本跑（慢一点）。`last reason` 指向默认设备：`ModelRunner` 初始化时把默认设备设成 cuda（[第 30 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L30)），最后改回 cpu（[第 38 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L38)），所以初始化时编译的版本，运行时都对不上。我的推测：graph 模式的 decode 不经过 Python，碰不到这个问题；#191 从 513 开始每步都走 eager，每遇到一种新的输入形状就再编译一次，累积到了上限。
+
+### `.item()` 的代价
+
+我答不上来，下面是讲解。
+
+**前提：CPU 和 GPU 是异步的。** CPU 只负责把命令排进 GPU 的队列，排完马上往下走；GPU 按顺序执行。比如 [`prepare_decode` 第 177 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L177)：
+
+```python
+context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+#                                                                          ↑ 只是排队，CPU 不等拷贝完成
+```
+
+**`.item()` 要把一个数拿回 CPU。** CPU 必须停下来，等 GPU 把排在它前面的命令全部做完、把结果传回来，这叫一次**同步**。#191 的一个 decode 步：
+
+| 顺序 | CPU | GPU | 原版有这一行吗 |
+|---|---|---|---|
+| 1 | 把 4 个输入的拷贝排进队列（[第 174-177 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L174-L177)），马上返回 | — | 有 |
+| 2 | 排一个 `max` | 执行拷贝 | **没有** |
+| 3 | `.item()`：**停下来等** | 拷贝做完 → 算 max → 结果传回 CPU | **没有** |
+| 4 | 排 buffer 拷贝、`graph.replay()`、采样 | **空闲**：队列空了，要等 CPU 发下一条命令 | 有；但原版走到这里时，GPU 还在做第 1 行的拷贝，不会空着 |
+| 5 | `.tolist()`（[第 225 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L225)）：停下来等 | 执行 replay、采样，结果传回 | 有 |
+
+多出来的代价 = 一次 GPU → CPU 来回 + 第 4 行 GPU 空着的那一段。
+
+**在 nano-vllm 里代价不大**：第 5 行本来每步就要同步一次（调度器要拿到新 token 才能决定下一步），CPU 从来不会比 GPU 多跑一步；到 ① 的时候，队列里只有这一步的几个小拷贝。估计每步几十微秒，而一个 decode 步要几毫秒（没测过）。
+
+**但这次同步本来不需要：**
+
+1. **这个数 CPU 上本来就有**：[第 172 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b386ae2f912c943dd1406bf068fced8e302c622f/nanovllm/engine/model_runner.py#L172) `context_lens.append(len(seq))` 是 Python 列表，`max(len(seq) for seq in seqs)` 不用碰 GPU。#191 是先把数送上 GPU，再把最大值取回来
+2. **每一步都要付**，包括前 512 步全走 graph 的时候。一个为少数情况准备的检查，让每一步都多一次同步
+3. **在更快的引擎里代价很大**：有的引擎在 GPU 算第 N 步的同时，让 CPU 准备第 N+1 步（比如 SGLang 的 overlap scheduler），这全靠 CPU 不等 GPU。热路径上一次 `.item()` 就把 CPU 拉回来等，重叠就没了
+
+更好的写法：只留 ②，去掉 ① 和多加的一列；或者保留 ① 的策略，但用 CPU 上的 `max(len(seq) ...)` 来判断。
+
+这只是“eager 回退的代价”的一半，是**检查**的代价，每步都付。另一半是**回退本身**：从 513 开始每步走 eager，要从 Python 一个一个发出几百个 kernel，而 graph 一次 `replay()` 就全发出去了。这一半还没测，见“下一步要想的问题”。
+
+### 小结：几种修法放在一起
+
+| 修法 | 检查放在哪 | 会崩吗 | 序列会超过 `max_model_len` 吗 | 一个坏请求影响谁 | 每步额外代价 |
+|---|---|---|---|---|---|
+| 多一列（issue 的建议） | 不检查 | 会，只是晚一个 block | 会 | 整批（崩溃） | 无 |
+| #191 | 每步 decode 前（① ②） | 不会 | 会，一直长到 `max_position_embeddings` 才出问题 | 见难题 3（还没答） | ① 每步一次同步；回退后每步走 eager |
+| #270 | 请求进来时 | 不会 | 不会 | 整批（`generate` 抛 `ValueError`），还可能留下前面的请求 | 无 |
+| 两个检查点（还没写） | 请求进来时（只拒绝这一个）+ 每步结束时（长到 `max_model_len` 就结束，`finish_reason="length"`） | 不会 | 不会 | 只有它自己 | 无（CPU 上比较一个整数） |
+
+---
+
 ## 自测：做过的题和纠正（2026-10-05）
 
 理解完之后让 Claude 出题检查。✅ 对 / ⚠️ 部分对 / ❌ 错，“当时的误区”是我自己答错或答偏的地方。
@@ -961,11 +1146,18 @@ prefill：给 500 个 token 分配 2 个 block      seq.block_table = [b0, b1]�
 - 结果（2026-10-06，`max_tokens` 改成了 500）：graph 模式报错 `(2) must match … (3)`，`Target sizes: [1, 2]`。详见上面“复现和实验”
 - 还没确认：报错前已经生成了几个 token（learning 版的 trace 里看 `STEP`；按推算是长度第一次到 513 的那一步）；eager 模式最后序列多长
 
+### 实验题（2026-10-07，还没做）
+
+1. **#270 的边界**：prompt 500 个 token，`max_tokens` 分别设 12 和 13。先预测：哪个能进？能进的那个，最后一步 decode 时序列多长、`block_tables` 几列？
+2. **#270 中途抛错留下的请求**：用 `try/except` 接住 `generate([短, 超长])` 的错误，再调用 `generate([短])`，返回几个结果？
+3. **eager 回退本身的代价**：设计两次运行，生成同样多的 token，一次全程走 graph，一次大部分走 eager，比较 decode 速度
+4. **原版 eager 对照**（第一轮第 6 题还没确认的部分）：`enforce_eager=True` 时序列最后多长？会不会出现和 #191 一样的 dynamo 警告？
+
 ### 难题（暂时太难，先放着）
 
 1. **顺序题**：`ModelRunner.__init__` 先 `allocate_kv_cache()` 再 `capture_cudagraph()`。反过来会怎样？会报错吗？（提示：`attention.py` 第 57-63 行，KV cache 开好之前 `self.k_cache` 是什么，`forward` 怎么处理它）
 2. **判断 issue 的说法**：作者说“缓冲区每步不清空是正确性问题”。构造一个旧数据**真的**导致算错的情况，或论证不可能；说明依赖哪个条件、由哪段代码保证
-3. **修法的代价（一）**：PR #191 装不下就改用 eager。16 个序列里 1 个长到 4097：这一步、下一步、下下一步各怎样？什么时候才能重新用上 graph？和“强制执行 `max_model_len`”比，哪个对用户友好、哪个对吞吐友好？
+3. **修法的代价（一）**：PR #191 装不下就改用 eager。16 个序列里 1 个长到 4097：这一步、下一步、下下一步各怎样？什么时候才能重新用上 graph？和“强制执行 `max_model_len`”比，哪个对用户友好、哪个对吞吐友好？（#191 的代码见“已有的 PR”一节。提示：① 比的是整批的什么？）
 4. **修法的代价（二）**：一开始就把缓冲区做宽到 40960 个 token（位置编码上限）。缓冲区变多大、显存是真正的代价吗？还有什么会跟着变（回想“CUDA graph 和 block 数的关系”）、对**短序列**的 decode 速度可能有什么影响？能彻底修好 #190 吗？（issue 建议的“多分配一列”已经用实验回答了：只把出错位置往后推一个 block，见“复现和实验”）
 5. **相邻两步之间什么变了**：A、B、C 连续两步，谁都没跨进新 block，5 个输入缓冲区里哪些值变了、怎么变，哪些没变？A 从 768 长到 769 时呢？这和 #175（每步重新拼张量）有什么关系，能怎么优化？
 6. **预测题（可以跑实验验证）**：batch 2、4、8 的 graph 各有多少个节点？哪些 kernel 在哪个 batch size 附近变？验证：把这几个 batch size 的 graph 也导出来数一数
