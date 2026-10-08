@@ -102,7 +102,7 @@ The questions I asked while studying each topic, with answers, diagrams and self
 
 | Topic | Page | Covers |
 |---|---|---|
-| CUDA graph | [QA-cuda-graph.md](QA-cuda-graph.md) | Graph buffers, how a decode batch runs, CUDA graph and why one per batch size, what a recorded graph contains, GPU kernels from a naive matmul to FlashAttention, how buffers, graph nodes and kernels connect, a self-quiz. Started from [#190](issues/190-cuda-graph-block-tables.md) |
+| CUDA graph | [QA-cuda-graph.md](QA-cuda-graph.md) | Graph buffers, how a decode batch runs, CUDA graph and why one per batch size, what a recorded graph contains, GPU kernels from a naive matmul to FlashAttention, how buffers, graph nodes and kernels connect, a self-quiz. Then the reproduction, the open PRs tested side by side, #270's exact limit, and the requests it leaves behind. Started from [#190](issues/190-cuda-graph-block-tables.md) |
 
 ## Resources
 

@@ -896,9 +896,9 @@ prefill：给 500 个 token 分配 2 个 block      seq.block_table = [b0, b1]�
 
 ### 有哪些 PR 在修 #190？
 
-| PR | 作者 · 时间 | 状态（2026-10-07） | 做法 | 修好 #190 了吗 |
+| PR | 作者 · 时间 | 状态（2026-10-08） | 做法 | 修好 #190 了吗 |
 |---|---|---|---|---|
-| [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) | Casten-Wang · 2026-09-06 | open，可以直接合并，0 条评论 | 请求进来时检查 `prompt + max_tokens ≤ max_model_len`，不满足就抛 `ValueError`；附 10 个 CPU 测试 | **修好了，从根上**：不让超长的请求进来 |
+| [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) | Casten-Wang · 2026-09-06 | open，可以直接合并，1 条评论（我 10-08 发的） | 请求进来时检查 `prompt + max_tokens ≤ max_model_len`，不满足就抛 `ValueError`；附 10 个 CPU 测试 | **修好了，从根上**：不让超长的请求进来 |
 | [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) | ilrewrite · 2026-03-24 | open，和现在的 main 有冲突 | 每步 decode 前检查，装不下就这一步改用 eager；缓冲区多加一列；复制前先 `fill_(-1)` | 只修了症状：不崩了，但序列照样长过 `max_model_len` |
 | [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258) | gcomfident-crypto · 2026-08-26 | 关闭，没合并 | 和 #191 同一个思路 | — |
 | [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263) | Casten-Wang · 2026-09-01 | 作者自己关了，同一天开了 #270 | #270 的第一版 | — |
