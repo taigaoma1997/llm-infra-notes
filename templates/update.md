@@ -20,4 +20,4 @@ Time spent: about __ h
 
 - [ ]
 
-<!-- After saving, add one line for this week to "Recent updates" in the root README. -->
+<!-- After saving, add one line for this week to "Recent updates" in the root README, starting with "**Week of <date>**". -->

@@ -97,6 +97,15 @@ The same approach as for [nano-vllm](../nano-vllm/README.md#how-i-reproduce-and-
 
 Write-ups will live in [issues/](issues/), together with a [backlog](issues/README.md#backlog) of the open issues and PRs I can reproduce on one GPU. The status of each one is tracked in [CONTRIBUTIONS.md](../../CONTRIBUTIONS.md).
 
+## Q&A (in Chinese)
+
+The questions I asked while studying each topic, with answers, diagrams and self-checks. These are my study pages, so they are in Chinese.
+
+| Topic | Page | Covers |
+|---|---|---|
+| Processes | [QA-processes.md](QA-processes.md) | The three ways to run it, which processes a server starts and what each one does, the startup log line by line, how one request travels between processes, why tokenization has its own process, and why there is only one detokenizer. A self-quiz |
+| KV cache and radix tree | [QA-kv-cache.md](QA-kv-cache.md) | One KV slot per token and the page table, how the radix tree shares prefixes (a run with real tokens), how the KV cache is laid out in GPU memory and written by the store kernel, how a batch is read by slot index without copying, how this compares with nano-vllm's 256-token blocks and why flash-attn needs them. A self-quiz |
+
 ## Resources
 
 - [Mini-SGLang announcement (LMSYS)](https://www.lmsys.org/blog/2025-12-17-minisgl/)
