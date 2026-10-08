@@ -15,7 +15,7 @@
 7. 代码在哪里：一步 decode 的执行路线
 8. 其他
 9. 复现和实验：在原版上复现、“多一列”的实验、报错信息怎么读、为什么没人提前检查越界、nano-vllm 是不是没设计好
-10. 已有的 PR：有哪些、四个版本实测、#270 请求进来时就拒绝、#191 改走 eager（①② 是否重复、多一列有没有用、两个上限、`.item()` 的代价）、几种修法对比
+10. 已有的 PR：有哪些、四个版本实测、#270 请求进来时就拒绝、#270 的边界（为什么 13 不崩 14 才崩）、留下的请求、我会怎么改、在 #270 下发评论、#191 改走 eager（①② 是否重复、多一列有没有用、两个上限、`.item()` 的代价）、几种修法对比
 11. 自测：做过的题和纠正
 12. 下一步要想的问题
 
@@ -788,6 +788,8 @@ run_model()
 
 不是评论，是 GitHub 自动生成的引用记录。我的 PR #280 正文写了 “max_model_len is still not enforced during generation (#190)”，只要正文里写了 `#190`，#190 的时间线上就会出现 “mentioned this”。
 
+2026-10-08 起 #190 的时间线上又多了一条 #270 的引用：我在 #270 下发的评论里写了 `#190`（见“在 #270 下发评论”）。
+
 ---
 
 ## 复现和实验（2026-10-06）
@@ -903,7 +905,7 @@ prefill：给 500 个 token 分配 2 个 block      seq.block_table = [b0, b1]�
 | [#253](https://github.com/GeeeekExplorer/nano-vllm/pull/253) | — | open | 性能优化 | 没有，正文写明不包括 #190 |
 | [#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) | 我 | open | 处理 KV cache 容量（#274、#279） | 没有，正文写了 #190 不在范围内 |
 
-**#270 的正文没有提 #190**，所以按 “190” 搜 PR 搜不到它（第一次找的时候就漏了），按 `max_model_len` 搜才找到。教训：找已有的修复，要按**机制的关键词**搜（`max_model_len`、`block_tables`），不能只搜 issue 编号。维护者看 #190 时也不会知道有这个 PR。
+**#270 的正文没有提 #190**，所以按 “190” 搜 PR 搜不到它（第一次找的时候就漏了），按 `max_model_len` 搜才找到。教训：找已有的修复，要按**机制的关键词**搜（`max_model_len`、`block_tables`），不能只搜 issue 编号。维护者看 #190 时也不会知道有这个 PR。所以 2026-10-08 我在 #270 下发了评论，见下面“在 #270 下发评论”。
 
 ### 实测：同一个脚本跑四个版本
 
@@ -941,7 +943,7 @@ def add_request(self, prompt, sampling_params):
 
 实测时报错发生在 `add_request`，还没进 `generate` 的 `while` 循环，所以这个请求一步都没算（模型加载、录 graph 在 `LLM(...)` 初始化时已经做完了）。
 
-读代码看出来的问题（第 2 条还没跑过）：
+读代码看出来的问题（第 2、3 条 2026-10-08 实测过，见下面几节）：
 
 1. **一个请求不合格，整批都失败**：`generate()` 直接抛异常，同一批里合格的请求也拿不到结果。和我批评 #277 的第一点一样
 2. **中途抛错，前面的请求会留在引擎里**：`generate` 是一个一个加请求的（[第 72 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L72)）
@@ -955,8 +957,112 @@ def add_request(self, prompt, sampling_params):
    ```
 
    因为[第 87、90 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L87-L90)把所有结束了的序列按 seq_id 收集起来，不分是哪次调用加进来的
-3. **检查比较严**：按 `max_tokens` 全部用完的最坏情况来查，哪怕模型可能早早生成 EOS 停下，也会被拒。vLLM 的 OpenAI 接口也这样拒绝，所以算取舍，不算错
-4. **没有链接 #190**（见上）
+3. **检查比较严**：按 `max_tokens` 全部用完的最坏情况来查，哪怕模型可能早早生成 EOS 停下，也会被拒。vLLM 的 OpenAI 接口也这样拒绝，所以算取舍，不算错。实测还发现它比崩溃点严一格，我觉得这样是对的（见“#270 的边界”）
+4. **没有链接 #190**（见上；我在评论里建议作者加 `Fixes #190`）
+
+### #270 的边界：为什么 13 不崩、14 才崩？（2026-10-08 实测）
+
+设置：prompt 500 个 token、`max_model_len=512`（缓冲区 2 列），`max_tokens` 取 12、13、14，原版和 #270 各跑一次。
+
+我的预测：没先写，直接跑了。13 在原版上没崩，我就接着试了 14，找到真正开始崩的地方。
+
+| `max_tokens` | 原版 | #270 |
+|---|---|---|
+| 12 | 生成 12 个，序列 512 | 一样 |
+| 13 | 生成 13 个，序列 **513**：没崩，但超过了 `max_model_len` | `ValueError: request requires 513 tokens, exceeding max_model_len=512` |
+| 14 | 崩：`(2) must match … (3)` | 拒绝（514 > 512，没跑） |
+
+**为什么差一个？最后生成的那个 token 只“写出来”，从来不“读进去”。** 一步 decode 按顺序做四件事：
+
+1. `may_append`：长度 % 256 == 1 就加一个 block（[scheduler.py 第 69 行](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L69)）
+2. 把 block 表复制进 graph 缓冲区，2 列（[model_runner.py 第 210 行](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L210)）
+3. 模型生成一个 token
+4. 生成数 == `max_tokens` 就结束（[scheduler.py 第 89 行](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L89)），新 token 不会再进模型
+
+```
+             进模型时长度   block 数   生成后长度   已生成
+prefill          500           2          501          1
+decode 1         501           2          502          2
+...
+decode 11        511           2          512         12   ← max_tokens=12 在这里结束
+decode 12        512           2          513         13   ← max_tokens=13 在这里结束（第 513 个 token 没进过模型）
+decode 13        513           3 ✗                         ← max_tokens=14 才走到这步：3 列塞不进 2 列，崩
+```
+
+所以 KV cache 里真正要放的是 `prompt + max_tokens − 1` 个 token：
+
+- 崩溃条件：`500 + max_tokens − 1 > 512`，即 `max_tokens ≥ 14`
+- #270 拒绝：`500 + max_tokens > 512`，即 `max_tokens ≥ 13`
+
+结论：
+
+- #270 守的是 `max_model_len` 的**定义**（序列最长多长，包括最后一个 token），不是崩溃点，所以严一格是对的
+- 原版 13 是“没崩，但已经越界”：序列到了 513。没崩 ≠ 对
+- 顺便回答了第一轮第 6 题没确认的部分：原来的复现（`max_tokens=500`）崩在进模型长度为 513 的那一步，也就是已经生成了 13 个 token
+
+### #270 中途抛错，前面的请求会留下吗？（2026-10-08 实测）
+
+**一句话**：一批请求里有一个超长，#270 抛错；但报错前已经进了队列的请求没人清理，会混进**下一次** `generate` 的结果里。
+
+三个前提：
+
+1. **队列一直在**：`self.scheduler` 在创建 `LLM` 时只建一次（[llm_engine.py 第 35 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L35)），它的 `waiting` 队列（[scheduler.py 第 16 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/scheduler.py#L16)）几次 `generate` 共用
+2. **`generate` 先一个一个加队列**（[第 71-72 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L71-L72)），再一直跑到队列空（[第 75 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L75)）
+3. **#270 的检查在 `add_request` 里**，每个请求进队列前查自己
+
+```
+generate([A, 超长])
+  第 1 圈  A     通过 → 进队列              waiting = [A]
+  第 2 圈  超长  ValueError → 循环中断，generate 直接退出
+结果：waiting = [A]，没人跑它，也没人删它
+```
+
+实验：同一个 `LLM` 调两次 `generate`，用 eager（和 CUDA graph 无关）。A、B 用同一个 10 token 的 prompt，`max_tokens` 分别是 5 和 7，加 `ignore_eos`，看 token 数就知道哪个结果是谁的。
+
+| | 我的预测 | 实测 |
+|---|---|---|
+| `[A, 超长]` 之后，`generate([B])` 返回几个 | 两个 | ✅ 2 个；报错后队列里 waiting 1 个，就是 A |
+| 第 0 个是谁的 | A | ✅ 5 个 token，A 的 |
+| 换成 `[超长, A]` | 一个，B 的 | ✅ 1 个，B 的；报错后队列是空的 |
+
+说明了什么：
+
+- **悄悄配错**：只传了 B 一个 prompt，却拿回 2 个结果，而且 `outputs[0]` 是 A 的。写 `outputs[0]` 或 `zip(prompts, outputs)` 的代码会拿到别人的结果，整个过程不报错
+- **看顺序**：超长的排在第几个，它前面的就留下几个
+- **A 的 `seq_id` 是 16，不是 0**：`seq_id` 是全局递增的（[sequence.py 第 16、19 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/sequence.py#L16-L19)），启动时 warmup 先建了 16 个假序列（[model_runner.py 第 96-97 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/model_runner.py#L96-L97)：`min(16384 // 512, 16)`），占掉 0 到 15。结果按 `seq_id` 排序（[第 90 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L90)），所以 A 排在 B 前面
+- **顺带：原版 eager**：同样的第一次调用，原版不报错，超长请求一直生成到 1000 个 token，远超 `max_model_len`。不用 CUDA graph 时，越界完全没有声音
+
+为什么说这是 #270 带来的：以前 `add_request` 几乎不会报错；#270 把 `ValueError` 当成给调用者的 “actionable” 错误，等于鼓励大家接住它，而一接住就会碰到这个问题。
+
+### 怎么改：跳过这一个，继续跑别的
+
+我的想法：参考我的 PR #280，某个请求超过界限时不报错，只结束它自己，继续跑其他请求。
+
+关键细节：**跳过的请求也要在结果里占一个位置**（空结果 + `finish_reason`）。如果它直接不出现，`outputs` 就比 `prompts` 少一个，后面的结果全部错一位，和“留下的请求”是同一种悄悄配错。
+
+#280 就是这么做的：
+
+- `Scheduler.add` 发现放不下：不进队列，直接标成 `FINISHED`，`finish_reason = "prompt_too_long"`（[scheduler.py 第 23-28 行](https://github.com/taigaoma1997/nano-vllm/blob/7a75224fede967380a1d7c7311b86e331dc21116/nanovllm/engine/scheduler.py#L23-L28)）
+- `generate` 里，`add_request` 返回的 seq 如果已经结束，就马上写进 `outputs`（[llm_engine.py 第 71-75 行](https://github.com/taigaoma1997/nano-vllm/blob/7a75224fede967380a1d7c7311b86e331dc21116/nanovllm/engine/llm_engine.py#L71-L75)）。按 `seq_id` 排序，位置不会乱
+
+套到 #190 上，就是“小结”表里最后一行：进队列时只结束这一个；生成中长到 `max_model_len` 就以 `"length"` 结束。
+
+另一种最小改法：在 `generate` 里先把所有 prompt tokenize、检查一遍，全过了再加队列。保留了 #270 的 `ValueError`，也不会留下请求，但一个坏请求还是让整批失败。注意字符串 prompt 原本在 `add_request` 里才 tokenize，所以 tokenize 要挪到前面。
+
+### 在 #270 下发评论（2026-10-08）
+
+为什么发：#270 能修好 #190，但它的正文没提 #190，看 #190 的人找不到它；这个 PR 也一直 0 条评论。留一条“我测了，它修了 #190”，成本低，对维护者有用。
+
+评论只说一件事：同一个脚本，原版崩，#270 一进来就拒；再建议作者在正文加 `Fixes #190`。边界和留下请求的发现先记在笔记里。
+
+评论在这里：[#270 下的评论](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717)。评论里写了 `#190`，GitHub 就自动在 #190 的时间线上加了一条 “cross-referenced”，指向 #270（和“其他”里“为什么 #190 下面有我的 comment？”是同一个机制）。
+
+发之前做的检查：
+
+- 评论里贴的是新写的精简脚本，先在原版和 #270 上各跑一次，报错原文逐字对上
+- 每句话都对得上实测：“长度到 513 时崩”来自上面的边界实验
+- 用 GitHub 的 Markdown API 渲染一遍，看表格、折叠和链接
+- 发之前再查一次两边的状态：没有新提交、新评论
 
 ### #191 为什么第一次跑不起来：旧代码碰上新版 transformers
 
@@ -1069,8 +1175,8 @@ context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cu
 |---|---|---|---|---|---|
 | 多一列（issue 的建议） | 不检查 | 会，只是晚一个 block | 会 | 整批（崩溃） | 无 |
 | #191 | 每步 decode 前（① ②） | 不会 | 会，一直长到 `max_position_embeddings` 才出问题 | 见难题 3（还没答） | ① 每步一次同步；回退后每步走 eager |
-| #270 | 请求进来时 | 不会 | 不会 | 整批（`generate` 抛 `ValueError`），还可能留下前面的请求 | 无 |
-| 两个检查点（还没写） | 请求进来时（只拒绝这一个）+ 每步结束时（长到 `max_model_len` 就结束，`finish_reason="length"`） | 不会 | 不会 | 只有它自己 | 无（CPU 上比较一个整数） |
+| #270 | 请求进来时 | 不会 | 不会 | 整批（`generate` 抛 `ValueError`），还会留下前面的请求（实测） | 无 |
+| 两个检查点（还没写） | 请求进来时（只拒绝这一个）+ 每步结束时（长到 `max_model_len` 就结束，`finish_reason="length"`） | 不会 | 不会 | 只有它自己（它在结果里照样占一个位置） | 无（CPU 上比较一个整数） |
 
 ---
 
@@ -1144,14 +1250,14 @@ context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cu
 
 - 我的预测：graph 模式会报错；eager 能跑通
 - 结果（2026-10-06，`max_tokens` 改成了 500）：graph 模式报错 `(2) must match … (3)`，`Target sizes: [1, 2]`。详见上面“复现和实验”
-- 还没确认：报错前已经生成了几个 token（learning 版的 trace 里看 `STEP`；按推算是长度第一次到 513 的那一步）；eager 模式最后序列多长
+- 后来确认（2026-10-08）：报错前已经生成了 13 个 token，崩在进模型的长度第一次到 513 的那一步（边界实验：`max_tokens` 13 不崩、14 崩，见“#270 的边界”）。eager 模式不报错，`max_tokens` 给多少就生成多少（留下请求实验里顺带看到：原版 eager 下 500 + 500 的请求一直跑到 1000 个 token）
 
-### 实验题（2026-10-07，还没做）
+### 实验题（2026-10-07 出的）
 
-1. **#270 的边界**：prompt 500 个 token，`max_tokens` 分别设 12 和 13。先预测：哪个能进？能进的那个，最后一步 decode 时序列多长、`block_tables` 几列？
-2. **#270 中途抛错留下的请求**：用 `try/except` 接住 `generate([短, 超长])` 的错误，再调用 `generate([短])`，返回几个结果？
+1. **#270 的边界**：prompt 500 个 token，`max_tokens` 分别设 12 和 13。先预测：哪个能进？能进的那个，最后一步 decode 时序列多长、`block_tables` 几列？✅ 2026-10-08 做了，还自己多试了 14，见“#270 的边界”
+2. **#270 中途抛错留下的请求**：用 `try/except` 接住 `generate([短, 超长])` 的错误，再调用 `generate([短])`，返回几个结果？✅ 2026-10-08 做了，预测全对，见“#270 中途抛错，前面的请求会留下吗？”
 3. **eager 回退本身的代价**：设计两次运行，生成同样多的 token，一次全程走 graph，一次大部分走 eager，比较 decode 速度
-4. **原版 eager 对照**（第一轮第 6 题还没确认的部分）：`enforce_eager=True` 时序列最后多长？会不会出现和 #191 一样的 dynamo 警告？
+4. **原版 eager 对照**（第一轮第 6 题还没确认的部分）：`enforce_eager=True` 时序列最后多长？会不会出现和 #191 一样的 dynamo 警告？⚠️ 长度顺带看到了（不报错，一直生成到 `max_tokens`）；dynamo 警告没专门看
 
 ### 难题（暂时太难，先放着）
 

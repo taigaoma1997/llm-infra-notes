@@ -16,7 +16,7 @@ This repo is my public learning log: source-code notes, reproducible experiments
 | PR | [nano-vllm #280: finish or reject sequences that cannot fit in the KV cache](https://github.com/GeeeekExplorer/nano-vllm/pull/280) (open) |
 | Issue | [nano-vllm #274](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md): reproduced the crash when a request cannot fit in the KV cache, and reported a second path to it as #279 |
 | Issue | [nano-vllm #170](notes/nano-vllm/issues/170-rmsnorm-fp32-residual.md): found why RMSNorm corrupts the residual in fp32, plus a second buggy path the issue missed. Compared my fix with the three open PRs; [#171](https://github.com/GeeeekExplorer/nano-vllm/pull/171) already fixes both, so no PR from me |
-| Issue | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Reproduced on upstream, showed that the fix the issue suggests only moves the crash, and tested the two open PRs on the same script: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) fixes the root cause, so no PR from me so far |
+| Issue | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Reproduced on upstream, showed that the fix the issue suggests only moves the crash, and tested the two open PRs on the same script: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) fixes the root cause, so instead of a PR I [posted the reproduction there](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) |
 
 ## Progress
 
@@ -38,7 +38,7 @@ Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRI
 
 <!-- Newest first, one line per week ("Week of" + the date in the update's file name), linked to the weekly update. Keep the last five. -->
 
-- **Week of 2026-10-05** Started mini-sglang: set it up in WSL2 on Windows, ran it end to end, built the same test tools as for nano-vllm, sorted its open issues and PRs, and learned how its processes and KV cache work. Looked inside nano-vllm's recorded CUDA graphs for #190, reproduced it, and tested the open PRs that fix it. Opened a docs PR to triton-windows (#56): [update](updates/2026/2026-10-05.md)
+- **Week of 2026-10-05** Started mini-sglang: set it up in WSL2 on Windows, ran it end to end, built the same test tools as for nano-vllm, sorted its open issues and PRs, and learned how its processes and KV cache work. Looked inside nano-vllm's recorded CUDA graphs for #190, reproduced it, tested the open PRs that fix it, and posted the reproduction on #270. Opened a docs PR to triton-windows (#56): [update](updates/2026/2026-10-05.md)
 - **Week of 2026-09-29** Fixed nano-vllm #274, reported #279, opened my first upstream PR (#280), reproduced #170 and compared its fixes, started #190: [update](updates/2026/2026-09-29.md)
 - **Week of 2026-09-25** Sorted nano-vllm's open issues and reproduced #274: [update](updates/2026/2026-09-25.md)
 - **Week of 2026-09-24** Started this repo and wrote down what I did before it: [update](updates/2026/2026-09-24-backfill.md)
