@@ -59,6 +59,8 @@ uv venv --python=3.12 .venv && source .venv/bin/activate
 uv pip install -e "learning[dev]" torch-c-dlpack-ext
 ```
 
+There is no conda environment. In each new terminal, `source ~/LLM/mini-sglang/activate.sh` enters `.venv` and puts `nvcc` on `PATH`.
+
 ### First run
 
 The upstream unit tests that need no GPU pass: `python -m pytest --no-cov tests/core` in `learning` gives 6 passed.
@@ -76,6 +78,13 @@ End to end, I ran the offline engine (`minisgl.llm.LLM`) on two chat prompts fro
 - It captures 23 CUDA graphs, for batch sizes 1, 2, 4, then every 8 up to 160.
 - Both runs give the same tokens even with `temperature=0.6`, because the engine seeds torch with 42 at startup.
 
+## How I reproduce and test fixes
+
+The same approach as for [nano-vllm](../nano-vllm/README.md#how-i-reproduce-and-test-fixes): one test script per issue, run against a chosen checkout by a small launcher, in one process per checkout. Two things are different here:
+
+- **`minisgl` is a namespace package**: it has no `__init__.py`, so Python merges every `minisgl/` folder it finds on `sys.path` into one package. The editable install keeps the `learning` checkout on `sys.path`, so putting another checkout first is not enough: a file that exists only in `learning` would still be imported from there, without an error. The launcher removes every other copy from `sys.path` and checks that `minisgl.__path__` has exactly one entry.
+- **The scheduler simulation keeps the real scheduler** and replaces only the model step. A fake engine returns one fixed token per request; message handling, prefill admission, chunked prefill, the radix cache, page allocation and the overlap loop are mini-sglang's own code. It loads no weights and runs a scenario in seconds. I checked it against the real engine on two scenarios, which cover chunked prefill, waiting for memory, eviction and a prefix-cache hit, with overlap scheduling on and off. The step-by-step traces (which requests run, how many tokens each has, free pages) were identical.
+
 ## Notes
 
 | # | Question | Status |
@@ -86,7 +95,7 @@ End to end, I ran the offline engine (`minisgl.llm.LLM`) on two chat prompts fro
 
 ## Issues I reproduced
 
-Write-ups will live in [issues/](issues/). The status of each one is tracked in [CONTRIBUTIONS.md](../../CONTRIBUTIONS.md).
+Write-ups will live in [issues/](issues/), together with a [backlog](issues/README.md#backlog) of the open issues and PRs I can reproduce on one GPU. The status of each one is tracked in [CONTRIBUTIONS.md](../../CONTRIBUTIONS.md).
 
 ## Resources
 
