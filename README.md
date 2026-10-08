@@ -2,7 +2,7 @@
 
 This repo is my public learning log: source-code notes, reproducible experiments, and upstream contributions.
 
-- **Now:** reproducing nano-vllm's open issues, and reading mini-sglang.
+- **Now:** nano-vllm's prefix cache (issues #219 and #208), and reading mini-sglang.
 - **Next:** a first contribution to SGLang.
 - **Upcoming:** [SGLang Summit 2026](https://www.sglang.io/summit), Nov 12–13 in San Francisco (registered).
 
