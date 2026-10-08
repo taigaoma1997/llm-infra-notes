@@ -7,7 +7,7 @@
 - Study Q&A (Chinese), with every question I asked along the way: [QA-cuda-graph.md](../QA-cuda-graph.md)
 - Side quest: while I was recording the graphs, `torch.compile` failed in the warmup before capture with `PermissionError: [WinError 5]`. That is a PyTorch 2.6 bug on Windows, unrelated to #190. I traced it and documented it in triton-windows's README: [PR #56](https://github.com/triton-lang/triton-windows/pull/56), [write-up](../../triton-windows/issues/56-pytorch-2.6-os-replace.md)
 
-<!-- Also add a row to CONTRIBUTIONS.md and keep its status in sync with this page. -->
+<!-- Also add a row to CONTRIBUTIONS.md and to the Contributions table in README.md, and keep its status in sync with this page. -->
 
 ## TL;DR
 

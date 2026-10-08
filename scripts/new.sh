@@ -62,7 +62,7 @@ case "${1:-}" in
     [ $# -ge 4 ] || usage
     project="$2"; number="$3"; slug="$4"; title="${5:-$4}"
     render issue.md "notes/$project/issues/$number-$slug.md" "$title" "$project" "$number"
-    echo "Next: add a row to CONTRIBUTIONS.md"
+    echo "Next: add a row to CONTRIBUTIONS.md and to the Contributions table in README.md"
     ;;
   exp)
     [ $# -ge 2 ] || usage

@@ -1,5 +1,7 @@
 # Contributions
 
+<!-- The same table is in README.md, under Contributions: when a row is added or its status changes, change both. -->
+
 Issues I reproduced, PRs I opened, and upstream discussions I took part in. Newest first.
 
 | Date | Project | Upstream | Type | Status | Write-up |

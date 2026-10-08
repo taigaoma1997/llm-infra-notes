@@ -5,7 +5,7 @@
 - Commit tested: `bb823b3`, unmodified upstream
 - Written: 2026-10-02 · Updated: 2026-10-03
 
-<!-- Also add a row to CONTRIBUTIONS.md and keep its status in sync with this page. -->
+<!-- Also add a row to CONTRIBUTIONS.md and to the Contributions table in README.md, and keep its status in sync with this page. -->
 
 ## TL;DR
 
