@@ -21,15 +21,15 @@
 ## What I learned
 
 - What cuda_graph looks like? -> print the results and checked
-- Difference on batch size -> the kernel changes wr.t. batch size. for batch = 1 or 16, the mat_mul change from gemv to cutlass, attention changed from 4 pieces to more pieces, 
+- Difference on batch size -> the kernel changes w.r.t. batch size. for batch = 1 or 16, the mat_mul change from gemv to cutlass, attention changed from 4 pieces to more pieces, 
 - How long sequence is split -> flash_fwd_splitkv + combine
-- Understanding of block table, cuda graph, kernel -> cuda graph records a series of kernel actions, and at each action, kernels fetches data based on blcok table info. 
-- The issue's suggested fix (add one extra column) does not fix it  -> This is not the root cause, as long as we did not check the length, there wll be error.  
+- Understanding of block table, cuda graph, kernel -> cuda graph records a series of kernel actions, and at each action, kernels fetches data based on block table info. 
+- The issue's suggested fix (add one extra column) does not fix it  -> This is not the root cause, as long as we did not check the length, there will be error.  
 - Three steps: a block is added, the table is rebuilt, then copied into the graph buffer -> the first two do not check size, leads to copy error in third step. 
 - Seems like nano-vllm has many default size limits that are assumed but have not been enforced ( #274, #279, #190) -> Not a problem for simplicity, but good for learning. 
-- Fix in #270 -> it checks prompt + max_tokens <= max_model_len, so stop the request before the add_request, solve this issue from the begining, but will block the whole batch. -> Give a comment to link the issue after reproducing; also analyzed the pros and cons in notes.
-- Fix in #191 -> use the eager mode, did not change the logic, and model will ultimate broke when reaching the limit of RoPE! | also, the second condiction is not useful as it will always be skipped. 
-- In #191, need to be more carefully on CPU and GPU sychronization.  
+- Fix in #270 -> it checks prompt + max_tokens <= max_model_len, so stop the request before the add_request, solve this issue from the beginning, but will block the whole batch. -> Give a comment to link the issue after reproducing; also analyzed the pros and cons in notes.
+- Fix in #191 -> use the eager mode, did not change the logic, and model will ultimately break when reaching the limit of RoPE! | also, the second condition is not useful as it will always be skipped. 
+- In #191, need to be more carefully on CPU and GPU synchronization.  
 - Compared multiple PR and their solution. 
 - My insights: a good pr should not just work, but also need to design from a higher level, think of the root cause, the cost of certain operations, etc. 
 

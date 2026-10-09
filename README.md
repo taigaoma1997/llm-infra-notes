@@ -54,7 +54,7 @@ Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRI
 
 <!-- Newest first, one line per week ("Week of" + the date in the update's file name), linked to the weekly update. Keep the last five. -->
 
-- **Week of 2026-10-05** Started mini-sglang: set it up in WSL2 on Windows, ran it end to end, built the same test tools as for nano-vllm, sorted its open issues and PRs, and learned how its processes and KV cache work. Looked inside nano-vllm's recorded CUDA graphs for #190, reproduced it, tested the open PRs that fix it, and posted the reproduction on #270. Opened a docs PR to triton-windows (#56), merged on 2026-10-09: [update](updates/2026/2026-10-05.md)
+- **Week of 2026-10-05** Started mini-sglang: set it up in WSL2 on Windows, ran it end to end, built the same test tools as for nano-vllm, sorted its open issues and PRs, and learned how its processes, KV cache, radix cache and overlap scheduling work. Looked inside nano-vllm's recorded CUDA graphs for #190, reproduced it, tested the open PRs that fix it, and posted the reproduction on #270. Opened a docs PR to triton-windows (#56), merged on 2026-10-09: [update](updates/2026/2026-10-05.md)
 - **Week of 2026-09-29** Fixed nano-vllm #274, reported #279, opened my first upstream PR (#280), reproduced #170 and compared its fixes, started #190: [update](updates/2026/2026-09-29.md)
 - **Week of 2026-09-25** Sorted nano-vllm's open issues and reproduced #274: [update](updates/2026/2026-09-25.md)
 - **Week of 2026-09-24** Started this repo and wrote down what I did before it: [update](updates/2026/2026-09-24-backfill.md)

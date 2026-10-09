@@ -1,6 +1,6 @@
 # mini-sglang 问答：KV cache 和 radix 树
 
-读 mini-sglang 的 KV cache 时问过的问题和答案，用中文写，方便自己复习。代码都对应 upstream [`9a91cfa`](https://github.com/sgl-project/mini-sglang/tree/9a91cfafe754aa85daee49998176275667eb58f2)，和 nano-vllm [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8) 对比。2026-10-07 整理，之后陆续补充。进程结构的问题在 [QA-processes.md](QA-processes.md)。
+读 mini-sglang 的 KV cache 时问过的问题和答案，用中文写，方便自己复习。代码都对应 upstream [`9a91cfa`](https://github.com/sgl-project/mini-sglang/tree/9a91cfafe754aa85daee49998176275667eb58f2)，和 nano-vllm [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8) 对比。2026-10-07 整理，10-08 补了"radix cache 的一生"。进程结构的问题在 [QA-processes.md](QA-processes.md)，overlap scheduling 在 [QA-overlap.md](QA-overlap.md)。
 
 数字都来自 RTX 4060 Laptop（8 GB）上的 Qwen3-0.6B：28 层，8 个 KV head，每个 head 128 维，bf16。
 
@@ -10,14 +10,15 @@
 2. 47008 个 token 是不是很小？
 3. vLLM / nano-vllm 的 block 属于一个序列，还是一个 batch？
 4. radix 树：用真实 token 走一遍
-5. KV cache 在显存里怎么放：分配、步长、地址
-6. 写：store kernel
-7. 读：batch 不拼接，只给 attention 一张编号表
-8. decode 一步要读多少字节
-9. nano-vllm（vLLM）的 block 在显存里怎么放
-10. 块大小怎么取舍
-11. 自测：做过的题和纠正
-12. 下一步要想的问题
+5. radix cache 的一生：命中、锁、插入、驱逐
+6. KV cache 在显存里怎么放：分配、步长、地址
+7. 写：store kernel
+8. 读：batch 不拼接，只给 attention 一张编号表
+9. decode 一步要读多少字节
+10. nano-vllm（vLLM）的 block 在显存里怎么放
+11. 块大小怎么取舍
+12. 自测：做过的题和纠正
+13. 下一步要想的问题
 
 ---
 
@@ -149,6 +150,64 @@ m = cache.match_prefix(C[:-1])                                     # C 进场：
 ```
 
 </details>
+
+---
+
+## radix cache 的一生：命中、锁、插入、驱逐
+
+上面讲的是树本身。radix cache 是把这棵树当**缓存**用：请求结束后**不释放**它的 KV，留在树里等下一个开头相同的请求来用。system prompt、多轮对话（每一轮都把历史再发一遍）、few-shot 示例都会大量命中。SGLang 的论文把它叫 RadixAttention。
+
+先纠正一个常见的理解：一个节点存的是**一段 token 和它们的格子号**，KV 本身在那块大张量里；节点没人用时**不会马上被驱逐**，而是留着当缓存，显存不够时才赶走。
+
+| 时机 | 发生什么 | 代码 |
+|---|---|---|
+| ① 请求进场 | 用 prompt（除了最后一个 token）去树里匹配，得到 handle | [prefill.py L44](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L44) |
+| | 判断放不放得下时用"空闲 + 可驱逐"：没人用的缓存也算可用空间 | [cache.py L33](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/cache.py#L33) |
+| | **锁住**匹配到的路径：从这个节点到根，每个节点 `ref_count + 1`，从"可驱逐"变成"受保护"。锁完再检查一次空间，因为锁住的部分不能再算作可用 | [prefill.py L52-L54](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L52-L54)、[radix_cache.py L113](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/kvcache/radix_cache.py#L113) |
+| | 把匹配到的格子号抄进这个请求的 page_table，只算剩下的部分 | [prefill.py L61](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L61) |
+| ② prefill 算完、请求还没结束 | `cache_req(finished=False)`：把 prompt 插进树，解旧锁、锁新节点。从这时起，**它还在 decode，别人就能命中它的 prompt** | [scheduler.py L164](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/scheduler.py#L164)、[cache.py L55](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/cache.py#L55) |
+| ③ 请求结束 | `cache_req(finished=True)`：prompt 和生成的内容一起插进树，然后解锁，`ref_count` 降到 0，变成"可驱逐"，**不释放** | [scheduler.py L202](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/scheduler.py#L202) |
+| ④ 显存不够 | 分配格子时空闲的不够就驱逐：找出 `ref_count = 0` 的**叶子**，按上次使用的时间排，**最久没用的先走**（LRU），一次赶走**整个节点**；父节点变成叶子后也可以接着被赶走 | [cache.py L106-L108](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/cache.py#L106-L108)、[radix_cache.py L148](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/kvcache/radix_cache.py#L148) |
+| 每次匹配 | 走过的节点更新时间戳，常用的前缀会一直留着 | [radix_cache.py L225-L229](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/kvcache/radix_cache.py#L225-L229) |
+
+所以每个格子在任何时刻都处于三种状态之一：**空闲**（free，不在树里）、**可驱逐**（evictable，在树里、没人在用）、**受保护**（protected，在树里、有请求在用）。
+
+**用调度器模拟走一遍**（真实的调度器代码，只把模型那一步换成假的；overlap 关）。KV cache 共 1000 格，每步 prefill 最多 350 个 token。X 和 Y 都是"同一段 300 token 的 system prompt + 各自 50 个 token"，各生成 5 个；W 是一个 700 token 的、和它们无关的 prompt。
+
+每一步打印两个时刻：**发出**是这一步刚交给 GPU，格子已经分配（free 已扣），但这一步的记账（插进树、加锁、结束时解锁）还没做；**处理完**是记账做完以后。只看"发出"那一行会以为第 2 步做完 protected 还是 350，其实 Y 是在第 2 步记账时才插进树的。
+
+```
+step 1 发出  | free 650, evictable   0, protected   0 | prefill X[0->350]
+step 1 处理完| free 650, evictable   0, protected 350 |
+step 2 发出  | free 600, evictable   0, protected 350 | prefill Y[300->350]
+step 2 处理完| free 600, evictable   0, protected 400 |
+step 3 发出  | free 598, evictable   0, protected 400 | decode X Y
+  …
+step 6 处理完| free 592, evictable 408, protected   0 |      （X、Y 在这一步结束）
+step 7 发出  | free 242, evictable 408, protected   0 | prefill W*[0->350]
+step 7 处理完| free 242, evictable 408, protected   0 |
+step 8 发出  | free   0, evictable 300, protected   0 | prefill W[350->700]
+step 8 处理完| free   0, evictable 300, protected 700 |
+step 9 发出  | free 299, evictable   0, protected 700 | decode W
+```
+
+| 时刻 | 刚刚发生了什么 |
+|---|---|
+| 第 1 步发出 | 给 X 分配 350 格：1000 − 350 = 650 |
+| 第 1 步处理完 | X 的 prompt 插进树并锁住：protected 350 |
+| 第 2 步发出 | Y 进场匹配，树里已经有 X，**命中 300**，只给剩下的 50 个分配格子：650 − 50 = 600 |
+| 第 2 步处理完 | Y 插进树（在第 300 个 token 处分叉）并锁住：300 + 50 + 50 = 400 |
+| 第 3 到 6 步 | decode，两个请求每步各要 1 格 |
+| 第 6 步处理完 | X、Y 结束：解锁但不释放。300 + 54 + 54 = 408（每条尾巴是 50 个 prompt token 加 4 个生成的 token；第 5 个刚采样出来，还没算过它的 KV） |
+| 第 7 步发出 | W 要预留 703 格，可用 = 空闲 592 + 可驱逐 408 = 1000，放得下；先分配 350 格 |
+| 第 7 步处理完 | W 被切开（`*`）还没算完，不插进树 |
+| 第 8 步发出 | W 再要 350 格，只空闲 242 → **驱逐**最久没用的两片叶子，X、Y 的尾巴共 108 格 |
+| 第 8 步处理完 | W 的 prompt 插进树并锁住：protected 700 |
+| 第 9 步发出 | decode 要 1 格，没有空闲 → 唯一能赶的是 300 token 的 system prompt 节点，**整个节点一起走**：300 − 1 = 299 |
+
+和 nano-vllm 比：nano-vllm 也会把用过的 block 留着等人命中，但只能共享装满的 256 块；radix cache 按 token 共享，而且明确是"留着，显存不够再按 LRU 赶走"。
+
+overlap scheduling 开着时，插进树的时机会晚一步，这会让上面的 Y 命中不了，见 [QA-overlap.md](QA-overlap.md)。
 
 ---
 
@@ -307,11 +366,19 @@ mini-sglang 也能用块：`--page-size 16`；用 trtllm 后端时会强制改�
 | block 是一个序列的还是一个 batch 的？ | | 一个序列的；batch 不占 block |
 | 预测 A、B、C 依次到来后 radix 树的样子 | ✅ | 和真实运行的输出一模一样 |
 
+2026-10-08：
+
+| 当时的想法 | 结果 | 纠正 |
+|---|---|---|
+| radix cache 就是一棵树，每个节点是一块 KV，可以共用；没人用就直接驱逐、释放给别人 | ⚠️ 大体对 | 节点存的是一段 token 和它们的格子号；没人用时**留着当缓存**，显存不够时才按 LRU 从叶子开始赶走，一次赶整个节点 |
+| 模拟输出里第 2 步 protected 是 350，"做完这一步不应该是 400 吗？" | ✅ 问对了 | 是 400。当时的输出只打印了"发出"那一刻，记账还没做；现在每步打印"发出"和"处理完"两行 |
+
 ---
 
 ## 下一步要想的问题
 
 - 演示里所有节点的 `ref_count` 都是 0，因为没有"锁"。真实运行时 B 进场后哪些节点变成 1？B 结束后呢？（看 `lock_handle`，以及它在 `prefill.py`、`cache.py` 里被调用的地方）
-- 如果 A 和 B **在同一步**进场，B 匹配时 A 还没插入树，会发生什么？B 的那 3 个格子和 A 的那 3 个格子，谁留在树里、谁被释放？B 的 page_table 指着哪一份？（[PR #142](https://github.com/sgl-project/mini-sglang/pull/142)、[PR #154](https://github.com/sgl-project/mini-sglang/pull/154) 说的就是这里）
+- 如果 A 和 B **在同一步**进场，B 匹配时 A 还没插入树，会发生什么？原理已经在 [QA-overlap.md](QA-overlap.md) 里想清楚了（overlap 开着时连"下一步"进场的也一样）；还差一个最小复现。（[PR #142](https://github.com/sgl-project/mini-sglang/pull/142)、[PR #154](https://github.com/sgl-project/mini-sglang/pull/154)）
+- 上面第 9 步只缺 1 格，却把整个 300 token 的 system prompt 节点赶走了。这样驱逐好不好？下一个带同样 system prompt 的请求进来会怎样？
 - 加 `--page-size 16`，KV cache 张量的形状和步长变成什么？格子号和 page_table 里存的数还是一回事吗？（[PR #80](https://github.com/sgl-project/mini-sglang/pull/80)、[PR #110](https://github.com/sgl-project/mini-sglang/pull/110)）
 - 一个 decode 步，batch 里 100 个请求、每个 1000 个 token：attention 要从 KV cache 读多少字节？和读一遍权重比哪个大？

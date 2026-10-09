@@ -19,9 +19,9 @@
 
 - Why RMSNorm? -> To scale every token embedding to the same scale, without shifting to zero-mean.
 - Why not LayerNorm? -> Faster, no need to do average and bias.  
-- When use RMSNrom? -> before the attention and MLP in every block, and also before the last layer.
+- When use RMSNorm? -> before the attention and MLP in every block, and also before the last layer.
 - RMSNorm and residual? -> Only norm on the original input, residual is circumvented. 
-- Core isuse? -> x.float() will copy the data when x is not float32. 
+- Core issue? -> x.float() will copy the data when x is not float32. 
 - My implementation? -> Add a if-else judgement, it can fix the bug, and find another situation that other PRs has not considered widely. My methods also fixed the second issue. 
 - Compute and speed? Almost the same time and memory across the 4 implementations. 
 - Decision? -> Decide not to raise my PR, since #171 has already resolved these two issues. 
