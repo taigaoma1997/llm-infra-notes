@@ -12,11 +12,11 @@ This repo is my public learning log: source-code notes, reproducible experiments
 
 | | |
 |---|---|
-| PR | [triton-windows #56: document a PyTorch 2.6 `torch.compile` error on Windows](https://github.com/triton-lang/triton-windows/pull/56) (open). Found while running nano-vllm, reproduced without it, traced to a PyTorch bug that was fixed in 2.7 but never reported: [write-up](notes/triton-windows/issues/56-pytorch-2.6-os-replace.md) |
+| PR | [triton-windows #56: document a PyTorch 2.6 `torch.compile` error on Windows](https://github.com/triton-lang/triton-windows/pull/56) (merged 2026-10-09). Found while running nano-vllm, reproduced without it, traced to a PyTorch bug that was fixed in 2.7 but never reported: [write-up](notes/triton-windows/issues/56-pytorch-2.6-os-replace.md) |
 | PR | [nano-vllm #280: finish or reject sequences that cannot fit in the KV cache](https://github.com/GeeeekExplorer/nano-vllm/pull/280) (open) |
 | Issue | [nano-vllm #274](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md): reproduced the crash when a request cannot fit in the KV cache, and reported a second path to it as #279 |
 | Issue | [nano-vllm #170](notes/nano-vllm/issues/170-rmsnorm-fp32-residual.md): found why RMSNorm corrupts the residual in fp32, plus a second buggy path the issue missed. Compared my fix with the three open PRs; [#171](https://github.com/GeeeekExplorer/nano-vllm/pull/171) already fixes both, so no PR from me |
-| Issue | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Reproduced on upstream, showed that the fix the issue suggests only moves the crash, and tested the two open PRs on the same script: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) fixes the root cause, so instead of a PR I [posted the reproduction there](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) |
+| Issue | [nano-vllm #190](notes/nano-vllm/issues/190-cuda-graph-block-tables.md): CUDA graph replay fails once a sequence grows past `max_model_len`. Reproduced on upstream, showed that the fix the issue suggests only moves the crash, and tested the two open PRs on the same script: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) fixes the root cause, so instead of a PR I [posted the reproduction there](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717), and its author then added `Fixes #190` |
 
 ## Contributions
 
@@ -26,8 +26,8 @@ Issues I reproduced, PRs I opened, and upstream discussions I took part in. Newe
 
 | Date | Project | Upstream | Type | Status | Write-up |
 |---|---|---|---|---|---|
-| 2026-10-08 | nano-vllm | [PR #270](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) | PR comment | posted, no reply yet: the #190 reproduction | [notes](notes/nano-vllm/issues/190-cuda-graph-block-tables.md#fixes-compared-the-open-prs-tested) |
-| 2026-10-06 | triton-windows | [PR #56](https://github.com/triton-lang/triton-windows/pull/56) | docs PR | PR open | [notes](notes/triton-windows/issues/56-pytorch-2.6-os-replace.md) |
+| 2026-10-08 | nano-vllm | [PR #270](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) | PR comment | posted: the #190 reproduction; the author then added `Fixes #190` | [notes](notes/nano-vllm/issues/190-cuda-graph-block-tables.md#fixes-compared-the-open-prs-tested) |
+| 2026-10-06 | triton-windows | [PR #56](https://github.com/triton-lang/triton-windows/pull/56) | docs PR | merged | [notes](notes/triton-windows/issues/56-pytorch-2.6-os-replace.md) |
 | 2026-10-03 | nano-vllm | [#190](https://github.com/GeeeekExplorer/nano-vllm/issues/190) | reproduced issue | root cause found, open PRs tested | [notes](notes/nano-vllm/issues/190-cuda-graph-block-tables.md) |
 | 2026-10-02 | nano-vllm | [#170](https://github.com/GeeeekExplorer/nano-vllm/issues/170) | reproduced issue | root cause found | [notes](notes/nano-vllm/issues/170-rmsnorm-fp32-residual.md) |
 | 2026-09-29 | nano-vllm | [PR #280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) | bug fix PR | PR open | [notes](notes/nano-vllm/issues/274-kv-cache-exhausted-assert.md) |
@@ -54,7 +54,7 @@ Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRI
 
 <!-- Newest first, one line per week ("Week of" + the date in the update's file name), linked to the weekly update. Keep the last five. -->
 
-- **Week of 2026-10-05** Started mini-sglang: set it up in WSL2 on Windows, ran it end to end, built the same test tools as for nano-vllm, sorted its open issues and PRs, and learned how its processes and KV cache work. Looked inside nano-vllm's recorded CUDA graphs for #190, reproduced it, tested the open PRs that fix it, and posted the reproduction on #270. Opened a docs PR to triton-windows (#56): [update](updates/2026/2026-10-05.md)
+- **Week of 2026-10-05** Started mini-sglang: set it up in WSL2 on Windows, ran it end to end, built the same test tools as for nano-vllm, sorted its open issues and PRs, and learned how its processes and KV cache work. Looked inside nano-vllm's recorded CUDA graphs for #190, reproduced it, tested the open PRs that fix it, and posted the reproduction on #270. Opened a docs PR to triton-windows (#56), merged on 2026-10-09: [update](updates/2026/2026-10-05.md)
 - **Week of 2026-09-29** Fixed nano-vllm #274, reported #279, opened my first upstream PR (#280), reproduced #170 and compared its fixes, started #190: [update](updates/2026/2026-09-29.md)
 - **Week of 2026-09-25** Sorted nano-vllm's open issues and reproduced #274: [update](updates/2026/2026-09-25.md)
 - **Week of 2026-09-24** Started this repo and wrote down what I did before it: [update](updates/2026/2026-09-24-backfill.md)

@@ -13,7 +13,7 @@ One folder per project or topic. Each note answers one question, and each folder
 | [miles](miles/) | RL post-training infrastructure | planned |
 | [tunix](tunix/) | Google's post-training library in JAX: SFT, RL, agentic RL | planned |
 | [papers](papers/) | reading list with short notes | ongoing |
-| [triton-windows](triton-windows/) | not a study track: a docs PR for a PyTorch 2.6 `torch.compile` error on Windows that I hit while running nano-vllm | PR open |
+| [triton-windows](triton-windows/) | not a study track: a docs PR for a PyTorch 2.6 `torch.compile` error on Windows that I hit while running nano-vllm | PR merged |
 
 ## Suggested order for the inference track
 

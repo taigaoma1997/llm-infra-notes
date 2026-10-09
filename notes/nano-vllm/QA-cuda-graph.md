@@ -896,16 +896,16 @@ prefill：给 500 个 token 分配 2 个 block      seq.block_table = [b0, b1]�
 
 ### 有哪些 PR 在修 #190？
 
-| PR | 作者 · 时间 | 状态（2026-10-08） | 做法 | 修好 #190 了吗 |
+| PR | 作者 · 时间 | 状态（2026-10-09） | 做法 | 修好 #190 了吗 |
 |---|---|---|---|---|
-| [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) | Casten-Wang · 2026-09-06 | open，可以直接合并，1 条评论（我 10-08 发的） | 请求进来时检查 `prompt + max_tokens ≤ max_model_len`，不满足就抛 `ValueError`；附 10 个 CPU 测试 | **修好了，从根上**：不让超长的请求进来 |
+| [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) | Casten-Wang · 2026-09-06 | open，可以直接合并，1 条评论（我 10-08 发的）；10-09 作者在正文加了 `Fixes #190` | 请求进来时检查 `prompt + max_tokens ≤ max_model_len`，不满足就抛 `ValueError`；附 10 个 CPU 测试 | **修好了，从根上**：不让超长的请求进来 |
 | [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) | ilrewrite · 2026-03-24 | open，和现在的 main 有冲突 | 每步 decode 前检查，装不下就这一步改用 eager；缓冲区多加一列；复制前先 `fill_(-1)` | 只修了症状：不崩了，但序列照样长过 `max_model_len` |
 | [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258) | gcomfident-crypto · 2026-08-26 | 关闭，没合并 | 和 #191 同一个思路 | — |
 | [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263) | Casten-Wang · 2026-09-01 | 作者自己关了，同一天开了 #270 | #270 的第一版 | — |
 | [#253](https://github.com/GeeeekExplorer/nano-vllm/pull/253) | — | open | 性能优化 | 没有，正文写明不包括 #190 |
 | [#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280) | 我 | open | 处理 KV cache 容量（#274、#279） | 没有，正文写了 #190 不在范围内 |
 
-**#270 的正文没有提 #190**，所以按 “190” 搜 PR 搜不到它（第一次找的时候就漏了），按 `max_model_len` 搜才找到。教训：找已有的修复，要按**机制的关键词**搜（`max_model_len`、`block_tables`），不能只搜 issue 编号。维护者看 #190 时也不会知道有这个 PR。所以 2026-10-08 我在 #270 下发了评论，见下面“在 #270 下发评论”。
+**#270 的正文原来没有提 #190**（10-09 作者按我的建议加上了），所以按 “190” 搜 PR 搜不到它（第一次找的时候就漏了），按 `max_model_len` 搜才找到。教训：找已有的修复，要按**机制的关键词**搜（`max_model_len`、`block_tables`），不能只搜 issue 编号。维护者看 #190 时也不会知道有这个 PR。所以 2026-10-08 我在 #270 下发了评论，见下面“在 #270 下发评论”。
 
 ### 实测：同一个脚本跑四个版本
 
@@ -958,7 +958,7 @@ def add_request(self, prompt, sampling_params):
 
    因为[第 87、90 行](https://github.com/GeeeekExplorer/nano-vllm/blob/b8996b26a70727e73f8747f976303ae87d93a94e/nanovllm/engine/llm_engine.py#L87-L90)把所有结束了的序列按 seq_id 收集起来，不分是哪次调用加进来的
 3. **检查比较严**：按 `max_tokens` 全部用完的最坏情况来查，哪怕模型可能早早生成 EOS 停下，也会被拒。vLLM 的 OpenAI 接口也这样拒绝，所以算取舍，不算错。实测还发现它比崩溃点严一格，我觉得这样是对的（见“#270 的边界”）
-4. **没有链接 #190**（见上；我在评论里建议作者加 `Fixes #190`）
+4. **没有链接 #190**（见上；我在评论里建议作者加 `Fixes #190`，10-09 他加上了）
 
 ### #270 的边界：为什么 13 不崩、14 才崩？（2026-10-08 实测）
 
@@ -1063,6 +1063,8 @@ generate([A, 超长])
 - 每句话都对得上实测：“长度到 513 时崩”来自上面的边界实验
 - 用 GitHub 的 Markdown API 渲染一遍，看表格、折叠和链接
 - 发之前再查一次两边的状态：没有新提交、新评论
+
+结果（2026-10-09）：作者没有回复评论，但在 PR 正文最后加了一行 `Fixes #190`。这样 #270 合并时，#190 会自动关闭。
 
 ### #191 为什么第一次跑不起来：旧代码碰上新版 transformers
 

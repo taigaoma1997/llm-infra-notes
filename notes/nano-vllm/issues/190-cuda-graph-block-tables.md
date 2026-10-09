@@ -1,9 +1,9 @@
 # [nano-vllm #190] CUDA graph replay fails once a sequence grows past max_model_len
 
-- Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/190 · Same bug, reported earlier: [#106](https://github.com/GeeeekExplorer/nano-vllm/issues/106) · Open PRs: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) (fixes the root cause; it did not link this issue, so I [commented there](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) with the reproduction) and [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) (avoids the crash) · Closed without merging: [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258), [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263)
-- Status: studied. Reproduced on unmodified upstream, found why nothing catches it earlier, and tested the two open PRs with the same script. No PR from me: #270 already fixes the root cause, so I posted the reproduction on it instead (2026-10-08).
+- Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/190 · Same bug, reported earlier: [#106](https://github.com/GeeeekExplorer/nano-vllm/issues/106) · Open PRs: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) (fixes the root cause; it did not link this issue, so I [commented there](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) with the reproduction, and its author then added `Fixes #190`) and [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) (avoids the crash) · Closed without merging: [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258), [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263)
+- Status: studied. Reproduced on unmodified upstream, found why nothing catches it earlier, and tested the two open PRs with the same script. No PR from me: #270 already fixes the root cause, so I posted the reproduction on it instead (2026-10-08). Its author then added `Fixes #190` to the PR (2026-10-09).
 - Commit read: `bb823b3`, unmodified upstream; the PRs at their heads, #270 `b8996b2` and #191 `b386ae2`
-- Written: 2026-10-03 · Updated: 2026-10-08
+- Written: 2026-10-03 · Updated: 2026-10-09
 - Study Q&A (Chinese), with every question I asked along the way: [QA-cuda-graph.md](../QA-cuda-graph.md)
 - Side quest: while I was recording the graphs, `torch.compile` failed in the warmup before capture with `PermissionError: [WinError 5]`. That is a PyTorch 2.6 bug on Windows, unrelated to #190. I traced it and documented it in triton-windows's README: [PR #56](https://github.com/triton-lang/triton-windows/pull/56), [write-up](../../triton-windows/issues/56-pytorch-2.6-os-replace.md)
 
@@ -16,7 +16,7 @@
 - **Only the CUDA graph path is affected.** Prefill, `enforce_eager=True`, and batches of more than 512 sequences build their tensors fresh every step. `example.py` sets `enforce_eager=True`, so it never hits this.
 - **Reproduced** on unmodified upstream. The fix the issue suggests, one extra buffer column, only moves the crash by one block ([Reproduction](#reproduction)). Nothing checks the table's width before the copy; the limit the buffer was sized for is assumed but never enforced ([Why nothing catches it earlier](#why-nothing-catches-it-earlier)).
 - **The open PRs, tested on the same script:** [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) fixes the root cause by rejecting any request whose prompt plus `max_tokens` exceeds `max_model_len`, but one bad request fails the whole call. [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) runs a step eagerly when the table would not fit: no crash, but the sequence grows past `max_model_len`. Details: [Fixes compared](#fixes-compared-the-open-prs-tested). What I take from it: [Thoughts](#thoughts).
-- **Posted on #270** (2026-10-08): #270 never mentioned #190, so I [commented](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) with this reproduction on both versions. GitHub now shows the link on #190's page too.
+- **Posted on #270** (2026-10-08): #270 never mentioned #190, so I [commented](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) with this reproduction on both versions. GitHub now shows the link on #190's page too. The next day its author added `Fixes #190` to the PR description, so #190 will be closed when #270 is merged.
 
 ## What I learned
 
@@ -168,14 +168,14 @@ In the message, `Target sizes` is the slice of the buffer, already clipped to th
 
 ## Fixes compared: the open PRs, tested
 
-| PR | Approach | Status (2026-10-08) | Fixes #190? |
+| PR | Approach | Status (2026-10-09) | Fixes #190? |
 |---|---|---|---|
-| [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) | Reject a request in `add_request` when prompt + `max_tokens` > `max_model_len` (`ValueError`); adds 10 CPU-only tests | open, mergeable, no review yet; my comment is the first | **Yes, at the root**: no sequence can outgrow the buffer |
+| [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) | Reject a request in `add_request` when prompt + `max_tokens` > `max_model_len` (`ValueError`); adds 10 CPU-only tests | open, mergeable, no review yet; my comment is the first, and the description now says `Fixes #190` | **Yes, at the root**: no sequence can outgrow the buffer |
 | [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) | Before each decode step, run eagerly if the table would not fit; one extra buffer column; clear the buffer before each copy | open, conflicts with main | Avoids the crash, but sequences still grow past `max_model_len` |
 | [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258) | Same idea as #191 | closed without merging | — |
 | [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263) | First version of #270, closed by its author the day #270 was opened | closed without merging | — |
 
-#270 never mentions #190, so searching the PRs for "190" does not find it; I found it by searching for `max_model_len`. A maintainer reading #190 would not know about it either. So on 2026-10-08 I [commented on #270](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717): the reproduction below, run on `main` and on the PR, and a suggestion to add `Fixes #190`. Before posting, I ran the exact script from the comment on both versions.
+#270 did not mention #190, so searching the PRs for "190" did not find it; I found it by searching for `max_model_len`. A maintainer reading #190 would not have known about it either. So on 2026-10-08 I [commented on #270](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717): the reproduction below, run on `main` and on the PR, and a suggestion to add `Fixes #190`. Before posting, I ran the exact script from the comment on both versions. The author added `Fixes #190` the next day, without replying.
 
 ### The same script on four versions
 
@@ -280,7 +280,7 @@ What this issue taught me beyond the bug itself:
 3. **Decide who pays for one bad request.** Crashing, raising from `generate()` as #270 does, and finishing only that request are three different answers. Only the last keeps the other requests' results. The same question came up with #274 and PR #277.
 4. **A check on the hot path should read data that is already on the CPU.** Shapes and Python lists are free; `.item()` on a GPU tensor is a sync. When two checks overlap, keep the one that matches the failure exactly, ② in #191, and drop the other.
 5. **Test a fix past its own new boundary, and do not take "no crash" as proof.** The extra column passes any test that stops before 768 tokens. #191 runs my reproduction cleanly, but only because the limit it ignores was set low; the next limit is the rotary table.
-6. **Search for existing fixes by mechanism, not only by issue number.** #270 never mentions #190. And an old PR can fail today for reasons unrelated to its fix, as #191 did after the transformers change, so I separate "does the fix work" from "does the PR's base still run".
+6. **Search for existing fixes by mechanism, not only by issue number.** #270 did not mention #190 until I pointed it out. And an old PR can fail today for reasons unrelated to its fix, as #191 did after the transformers change, so I separate "does the fix work" from "does the PR's base still run".
 
 ## Inside a recorded graph
 

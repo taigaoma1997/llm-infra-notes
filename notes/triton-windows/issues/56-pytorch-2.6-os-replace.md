@@ -1,10 +1,10 @@
 # [triton-windows PR #56] Document the PyTorch 2.6 `os.replace` error in the README
 
 - Upstream PR: https://github.com/triton-lang/triton-windows/pull/56 (to the `readme` branch)
-- Status: PR open
+- Status: merged on 2026-10-09 by the maintainer, with no changes asked (squashed as [`b5ec0b4`](https://github.com/triton-lang/triton-windows/commit/b5ec0b461d8fe55c2d10c5bb185097ef5428f6a1)). The entry is in the README: [Error with `os.replace` in PyTorch 2.6](https://github.com/triton-lang/triton-windows/blob/readme/README.md#error-with-osreplace-in-pytorch-26)
 - Versions tested: torch 2.6.0+cu124 with triton-windows 3.2.0.post21; source compared with torch 2.7.0
 - Found while working on [nano-vllm #190](../../nano-vllm/issues/190-cuda-graph-block-tables.md)
-- Written: 2026-10-06
+- Written: 2026-10-06 · Updated: 2026-10-09
 
 ## TL;DR
 
