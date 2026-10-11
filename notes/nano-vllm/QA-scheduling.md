@@ -2,7 +2,14 @@
 
 读 nano-vllm [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) 和 [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) 时，我问过的问题和答案。这两个 issue 讲的是 prefix cache 里一个很小的细节，可要看懂它，得先弄清调度器每一步在做什么、block 怎么被共享、命中以后怎么算。问着问着就延伸到了调度器的整体设计：continuous batching、预留和抢占、prefill 和 decode 要不要放在同一步。
 
-用中文写，方便自己复习。代码都对应 upstream [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)；“旧版”指 #218 合并之前的 `f64d821~1`（[`44a51af`](https://github.com/GeeeekExplorer/nano-vllm/tree/44a51afc8a7f60e75ce3f4ee94632430eff9de65)）。2026-10-10 整理，#219 做完后再补结论。
+用中文写，方便自己复习。代码都对应 upstream [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)；“旧版”指 #218 合并之前的 `f64d821~1`（[`44a51af`](https://github.com/GeeeekExplorer/nano-vllm/tree/44a51afc8a7f60e75ce3f4ee94632430eff9de65)）。2026-10-10 整理。
+
+**结论先说**
+
+- **共享只发生在序列进来的那一刻**（prefill 查字典），能共享的只有装满的 block，而且只能共享“已经登记”的 block（3.2）
+- **#208 和 #219 争的是“什么时候登记”**：旧版分配 block 时就登记，同一步后进来的序列能用上前面的 block；新版算完才登记，同一步里的相同前缀各占一份（#219），字典还会被后登记的覆盖（5.2）
+- **#208 在 nano-vllm 里不会算错**：一次 forward 里每一层都是先写 K/V、再做 attention，B 读的时候 A 已经写好了。真实引擎上，旧版 A、B、C 的输出完全一样（5.4）
+- **两次运行的输出差几个 token，不一定是 bug**：换了 attention 路径或者 batch 的 token 数，用的 kernel 就不同，bf16 的最后几位跟着变，几乎打平的 token 会被翻过来（7.3 第 9 条）
 
 **目录**（先看第 1 部分建立全局，再按顺序往下）
 
@@ -12,8 +19,19 @@
 4. 命中以后怎么算：一部分 K/V 读 cache，一部分现算（每层先写后读，一个命中 10 个 block 的例子）
 5. 案例：#208 和 #219（时间线、按 block 画出每一步、调度器模拟、推理和真实引擎实验、PR #243）
 6. 调度器的设计取舍：continuous batching、预留和抢占、混合 batch，和 mini-sglang、SGLang、vLLM 对比
-7. 我的理解和纠正
-8. 还没回答的问题
+7. 我的理解和纠正（7.1 一次推理的全流程 · 7.2 prefix cache 和 #208 · 7.3 真实引擎实验），每条是背景、我答了什么、正确答案：
+   1. 7.1 · 1000 条 prompt 一起 `generate`，从头到尾发生了什么？
+   2. 7.2 · 复现前预测：B 的 `num_cached_tokens` / `num_scheduled_tokens` 各是多少？
+   3. 7.2 · 新版把登记挪到算完以后，新进来的序列是不是都看不到以前的结果？
+   4. 7.2 · 旧版里 B 命中了 A 还没算的 block，B 会算错吗？
+   5. 7.2 · A、B 是“同时算”的，B 怎么读得到 A 写的东西？
+   6. 7.2 · D 命中了 10 个 block，剩下的 token 是算完 attention 以后再写进 cache 吗？
+   7. 7.3 · 运行前预测：旧版里 A 和 B 生成的 32 个 token 一样吗？
+   8. 7.3 · 运行前预测：新版里 C 命中的是 A 的 block 还是 B 的？
+   9. 7.3 · 新版里 A 和 C 为什么从第 22 个 token 开始不同？
+   10. 7.3 · 为什么把采样换成 argmax，而不是把温度设得很小？
+   11. 7.3 · 同一步里 A 的 600 个 token 全是现算的，A 的 attention 带不带 `block_table`？
+   12. 7.3 · 这个实验能证明 #208 在 nano-vllm 里不会算错吗？
 
 ---
 
@@ -481,7 +499,7 @@ dict->|         |         |         |   h0    |   h1    |         |         |
 | B 在这一步能用上 A 的 block 吗 | 能 | 不能 | 算完以后才合并 |
 | B 要算几个 token | 88 | 600 | 600 |
 | 这一步结束后占几个 block | 4 | 6 | 4 |
-| 风险 | #208：命中了还没算的 block | #219：重复存储，以后还可能查不到 | 留到 #219 做完再判断 |
+| 风险 | #208：命中了还没算的 block | #219：重复存储，以后还可能查不到 | 存储省回来了，多算的 512 个 token 省不回来（没有细看它的边界情况） |
 
 ### 5.3 复现：调度器模拟
 
@@ -500,7 +518,7 @@ dict->|         |         |         |   h0    |   h1    |         |         |
 
 和 5.2 推的完全一致。另外两个细节：
 - A 的 block 2 和 B 的 block 3（新版是 5）装的是同样 88 个 token，但没装满，两个版本都不共享
-- `postprocess` 后旧版 601、新版 600：旧版在 `append_token` 之后 `num_cached_tokens += 1`，把刚采样出来、K/V 还没写进 cache 的第 601 个 token 也算了进去；新版只加这一步真正算过的 600 个。哪个说的是实话，留在第 8 部分
+- `postprocess` 后旧版 601、新版 600：旧版在 `append_token` 之后 `num_cached_tokens += 1`，把刚采样出来、K/V 还没写进 cache 的第 601 个 token 也算了进去；新版只加这一步真正算过的 600 个。**新版说的是实话**：第 601 个 token 刚采样出来，它的 K/V 要等下一步 decode 把它当输入送进模型时才写进 cache（[`prepare_decode` L178-L181](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L178-L181)），旧版提前把它算进去了
 
 ### 5.4 #208 会不会算错？（推理和真实引擎实验）
 
@@ -560,7 +578,7 @@ layer 27  |  empty   |  empty   |  empty   |  empty   |
 - **旧版里 B 和 A 完全一样**，C（正常命中）也一样。B 读的确实是 A 刚写好的数据，“同一步命中”和“正常命中”效果相同，和上面的推理一致
 - **新版里 C 命中的是 B 的 block**，和 5.2 新版 ④-b 画的一样：字典被 B 覆盖了。#219 的第二个后果在真实引擎里也出现了
 
-结果里还有几个现象（新版里 A 和 C 为什么分叉、旧版里为什么不分叉；为什么要用 argmax 而不是很小的温度），我做成了分析题，答案和纠正见 7.3。
+结果里还有几个现象（新版里 A 和 C 为什么分叉、旧版里为什么不分叉；为什么要用 argmax 而不是很小的温度），我做成了分析题，答案见 7.3 第 9–12 条。
 
 #### 结论和前提
 
@@ -664,141 +682,161 @@ SGLang 和 vLLM 两列是按我对它们的了解写的，还没对照代码。m
 
 ## 7. 我的理解和纠正
 
-✅ 对 / ⚠️ 部分对 / ❌ 错。
+学的过程中我答过的问题和说过的理解。每条都是：当时的背景 → 我答了什么 → 正确答案。
 
-### 7.1 1000 条 prompt 进来以后，到底发生了什么
+### 7.1 一次真实推理从头到尾
 
-学完前面几部分，我先用自己的话把整个过程写了一遍，大意是：
+#### 1. 1000 条 prompt 一起 `generate`，从头到尾发生了什么？
 
-> 1000 条 prompt 按进来的顺序排队。调度器选最前面几条、能把 seq len 填满的，给它们算 block id；同一批里就算前缀完全相同，也指不到同一个 block（旧版可以）。算完以后把 K/V 放进 block，前缀相同的 block 会不会直接覆盖？还有剩下的序列，就继续给它们做 prefill，因为 prefill 优先级更高，一直到 block 满了为止；这时候就能用上前面算过的 KV cache。所有序列都放进去、block 还有多的，就开始 decode。遇到 EOS，这个序列的 block 就被逐出去；超过 block size 就生成一个新 block，之前的 block 整合到 KV cache 里。这样一直到全部完成。
+**背景**：学完第 1–4 部分后，我用自己的话把整个过程写了一遍。例子沿用第 1 部分：KV cache 有 160 个 block，每条 prompt 600 个 token（占 3 个 block），`max_tokens=100`。
 
-大方向是对的，但有几处说错了，也有几处没说清楚。下面是对照代码以后，**实际发生的事情**。沿用第 1 部分的例子：KV cache 有 160 个 block，每条 prompt 600 个 token（占 3 个 block），`max_tokens=100`。
+**我答**：1000 条 prompt 按进来的顺序排队；调度器选最前面几条、能把 seq len 填满的，给它们算 block id，同一批里前缀相同也指不到同一个 block（旧版可以）；算完以后把 K/V 放进 block，前缀相同的 block 会不会直接覆盖？剩下的序列继续 prefill，直到 block 满了，这时能用上前面算过的 KV cache；所有序列都放进去、block 还有多的，就开始 decode；遇到 EOS，block 就被逐出去；超过 block size 就生成一个新 block，之前的 block 整合到 KV cache 里。
 
-先看全貌：
+**正确答案**：
 
-| 步骤 | 发生了什么 |
-|---|---|
-| ① 排队 | 1000 条全部进 waiting，还没分配 block |
-| ② 第 1 步 prefill | 从队头一条条接，每条先查 prefix cache；接到第 27 条，token 预算用完；不跳过队头；同一步里的序列彼此不共享（#219） |
-| ③ GPU forward | 每一层先写 K/V 再做 attention，各写各的 block |
-| ④ postprocess | 登记装满的 block；每条拿到自己生成的第一个 token |
-| ⑤ 第 2 步 prefill | 又接 26 条，只剩 1 个空 block；能命中第 1 步登记的 block（跨步共享）；第 1 步的 27 条这一步在等 |
-| ⑥ decode | 一条都接不进了才 decode；700 个 token 用 3 个 block 就够，不会抢占；序列跨进新 block 又没有空 block 时才抢占 |
-| ⑦ 有序列结束 | `ref_count` 减到 0 才放回空闲列表，登记还在；下一步先接新的，其余 52 条停一步 |
-| ⑧ block 不搬动 | 不合并，也不“整合进 KV cache” |
-| ⑨ 收尾 | 离线任务的尾巴，batch 越来越小；最后按序列编号返回结果 |
-
-每一步的细节：
-
-**① 排队。** `generate` 把 1000 条 prompt 都变成序列，按顺序放进 waiting 队列。这时还没有分配任何 block，GPU 也还没开始算。
-
-**② 第 1 步，prefill：从队头一条条接进来。** 调度器从 waiting 队头开始，一条一条往这一步里放。每放一条，先查 prefix cache：这条 prompt 开头那些装满的 block，有没有已经登记过的？有就直接共用（`ref_count + 1`），没有就从空闲列表分配新 block。一直放到三个条件之一先发生：这一步的 token 预算（16384）用完、这一步已经有 512 条、队头那条要的 block 不够。这里先碰到的是 token 预算：放了 27 条（16200 个 token）以后，第 28 条整条放不下（只有这一步的第一条允许分段），就停了。调度器不会跳过它去放后面更短的。
-
-同一步里接进来的序列，在新版里彼此**不共享**：登记要等到这一步算完以后（#219，第 5 部分）。
-
-**③ GPU 算这 27 条，K/V 写进各自的 block。** 每一层都是先把这一步所有 token 的 K/V 写进各自 block 里的位置（`slot_mapping` 指定），再做 attention。每条序列只往自己的 block 里写，不会覆盖别人的 block（4.3）。
-
-**④ postprocess。** 每条序列开头两个装满的 block 算出 hash、登记进字典（新版在这里登记）。每条序列拿到自己生成的第一个 token，长度从 600 变成 601。
-
-**⑤ 第 2 步，还是 prefill：继续接。** 下一步调度器还是先尝试接新的。这次接了 26 条，block 用掉 53 × 3 = 159 个，只剩 1 个。如果这些 prompt 和第 1 步的有相同的前缀，这一步就能命中第 1 步登记过的 block，这就是跨步共享。这一步里，第 1 步接进来的 27 条只能等着，没有生成新 token。
-
-**⑥ 第 3 步起，decode：再也接不进了。** 队头要 3 个 block，只剩 1 个，一条都接不进，这一步才做 decode：running 里的 53 条各送 1 个 token、各生成 1 个 token。新 token 的 K/V 写进这条序列最后一个 block 的下一个位置。这个例子里序列最长 700 个 token，3 个 block 就装得下，不需要新 block。如果 `max_tokens` 更大，某条序列长到 769（跨进第 4 个 block）时就要一个新的；没有空 block 时，调度器会抢占 running 队尾的序列：释放它的 block，把它放回 waiting 队头，以后重新 prefill（6.2）。
-
-**⑦ 有序列结束，就接新的进来。** 第 50 步，A 遇到 EOS，在 postprocess 里结束：它的 3 个 block 各自 `ref_count - 1`，减到 0 的放回空闲列表。放回去不等于清掉，K/V 和字典里的登记都还在，后来的序列还能命中（3.3）。下一步调度器又先尝试接新的：空 block 有 4 个，队头要 3 个，够了，于是这一步 prefill 1 条，其余 52 条暂停一步；再下一步接不进了，又回到 decode。batch 就这样一边有序列离开、一边有新序列补进来，不用等一整批做完（continuous batching，6.1）。
-
-**⑧ block 从头到尾不搬动。** 一个序列的 K/V 始终待在它分到的那几个 block 里，block 不会合并，也不会“整合进 KV cache”：KV cache 本来就是启动时一次性分配好的一整块，block 只是其中的 256 行。`block_table` 记着这些 block 的顺序，attention 按这张表去读（4.3）。
-
-**⑨ 收尾。** 1000 条快做完时，waiting 空了，running 里的序列越来越少，每步 decode 的 batch 越来越小，这是离线任务的“尾巴”，GPU 用得不满。等 waiting 和 running 都空了，`generate` 把所有结果按序列编号排好返回。
-
-和我原来的说法对照：
-
-| 我原来的说法 | 判断 | 差在哪 |
+| 步骤 | 发生了什么 | 例子里的数字 |
 |---|---|---|
-| 按进来的顺序排队 | ✅ | 补充：被抢占的序列会插回**队头**（①⑥） |
-| 选最前面几条、能把 seq len 填满的 | ⚠️ | 标准是 token 预算、每步 512 条、队头要的 block 够不够，三者先到为止；而且不跳过队头（②） |
-| 同一批里前缀相同也指不到同一个 block，旧版可以 | ✅ | 这就是 #219，只发生在同一步里；跨步照样共享（②⑤） |
-| 前缀相同的 block 会不会直接覆盖？ | ⚠️ | **K/V 数据不覆盖**，各写各的 block，结果是存了两份；**被覆盖的只是字典里的一条登记**：后登记的盖掉先登记的，先登记的那条序列照样用自己的 block 算到结束（③④，5.2） |
-| 继续 prefill，直到 block 满了 | ✅ | 补充：只要接进了至少一条，这一步就只做 prefill，正在 decode 的都暂停（⑤⑦） |
-| 后面的能用前面算过的 KV cache | ✅ | 前面的序列已经结束也可以，只要它的 block 还没被分给别人（⑤⑦） |
-| 所有序列都放进去、block 还有多的，就开始 decode | ⚠️ | 条件是这一步**一条都接不进**；有序列结束、释放了 block，下一步又会先 prefill（⑥⑦） |
-| EOS 了，block 就被逐出去 | ⚠️ | 靠 `ref_count`：只减掉自己那份，减到 0 才放回空闲列表，而且内容和登记暂时都还在（⑦） |
-| 超过 block size 就生成新 block，之前的 block 整合到 KV cache 里 | ❌ | **不会整合**：block 本来就是 KV cache 里的一段，不移动、不合并（⑧） |
+| ① 排队 | 所有 prompt 变成序列，按顺序放进 waiting。还没分配 block | 1000 条进 waiting |
+| ② 第 1 步 prefill | 从队头一条条接：每条先查 prefix cache，命中的 block 直接共用，没命中的分配新 block。一直接到三者之一：token 预算用完 / 已有 512 条 / 队头要的 block 不够。**不会跳过队头**去接后面更短的。同一步接进来的序列之间不共享（#219） | 接了 27 条（27 × 600 = 16200 个 token），第 28 条放不下整条，停 |
+| ③ GPU forward | 每一层先把这一步所有 token 的 K/V 写进各自的 block，再做 attention。各写各的 block，**前缀相同也不会覆盖别人的 block**，结果是存了两份 | 27 条的 K/V 写进 81 个 block |
+| ④ postprocess | 装满的 block 算 hash、登记进字典（同一个 hash 后登记的会把字典里先登记的那条盖掉，但 block 里的数据不动）。每条拿到第一个生成的 token | 每条登记 2 个 block；长度 600 → 601 |
+| ⑤ 第 2 步 prefill | 只要还接得进，下一步还是 prefill。和前面的步前缀相同的能命中（跨步共享）。已经进来的序列这一步不生成 | 又接 26 条：共 53 条，用掉 159 个 block，只剩 1 个 |
+| ⑥ decode | **一条都接不进了**才做 decode：running 里每条加 1 个 token。跨进新 block 时要一个新的，没有空的就抢占 running 队尾的序列（释放它的 block，放回 waiting 队头，以后重算） | 队头要 3 个 block，只剩 1 个 → decode。序列最长 700 个 token，3 个 block 够用，不会抢占 |
+| ⑦ 有序列结束 | `ref_count - 1`，减到 0 才放回空闲列表；K/V 和登记都还在，后来的序列还能命中。下一步先试着接新的，接新序列的那一步，正在生成的都停一步 | 第 50 步 A 结束，空出 3 个 block → 第 51 步接 1 条，其余 52 条停一步 |
+| ⑧ block 不搬动 | block 是 KV cache 里固定的 256 行，不移动、**不合并、不“整合进 KV cache”**。`block_table` 记着一个序列用了哪些 block、什么顺序 | — |
+| ⑨ 收尾 | waiting 空了以后，running 越来越少，每步 decode 的 batch 越来越小（离线任务的尾巴）。最后按序列编号返回结果 | — |
 
-### 7.2 其他几处
+### 7.2 prefix cache 和 #208
 
-- ❌ **复现前的预测**：`block_table` 两个版本都预测对了，但 `num_cached_tokens / num_scheduled_tokens` 把两个版本写反了（旧版写成 0/600，新版写成 512/88）。判断方法：**block 共享了，cached token 就跟着变**。旧版 B 用了 A 的 0、1，前 512 个就不用自己算
-- ⚠️ **“新版让新序列看不到以前的结果，只能重算”**：只对了一半。看不到的只是**同一步**里别人的结果，以前的步登记过的照样能命中（5.5）
-- ⚠️ **“A、B 在同一个 prefill 里，prefill 反正都要重新算，所以 #208 没问题”**：结论方向对，理由错了。B 并没有重算前 512 个 token（`num_scheduled_tokens=88`），真正的理由是每一层先写后读（5.4）
-- ❌ **真实引擎实验前的预测：“旧版里 A、B 不一样，因为 B 算的时候 block 里是空的”**：实际完全一样。我把 block 想成了只有一份；其实每一层都有自己的一份，forward 开始时 28 层都是空的，但每一层的 attention 读之前，那一层已经被 ② 写满了（5.4）
-- ⚠️ **“新版里 C 命中的是 A 的 block”**：实际是 B 的。postprocess 里 B 后登记，把 A 的覆盖了（5.2 新版 ④-b）。和调度器模拟里看到的 `{h0: 3, h1: 4}` 是同一件事
-- ⚠️ **“A、B 在 forward 里是同时算的，那 B 怎么读得到 A 的？”**：A、B 在同一批 kernel 里并行，但 kernel 之间有先后，每层的 store 做完 attention 才开始（5.4）
-- ⚠️ **“每个 attention 算完以后再把结果塞进 cache”**：K/V 是在 attention **之前**写进去的，存的是 qkv 投影出来的 k、v，不是 attention 的输出（4.3、4.4）。我后来总结的“先算 q、k、v，再写进 KV cache，再做 attention”是对的 ✅
+#### 2. 复现前预测：B 的 `num_cached_tokens` / `num_scheduled_tokens` 各是多少？
 
-### 7.3 真实引擎实验后的分析题
+**背景**：5.3 的调度器模拟：8 个 block，A、B 是同一个 600-token prompt，在同一步 prefill。`num_cached_tokens` 是 B 开头有多少个 token 的 K/V 已经在 cache 里、这一步不用算；`num_scheduled_tokens` 是这一步要算多少个。
 
-5.4 的实验跑完以后，我答了四道分析题。
+**我答**：旧版 0 / 600，新版 512 / 88。
 
-**1. 新版里 A 和 B 一样，A 和 C 却在第 22 个 token 分叉，为什么？** ⚠️（后来用对照实验确认了）
+**正确答案**：旧版 **512 / 88**，新版 **0 / 600**。
+- 旧版 B 的 `block_table` 是 `[0, 1, 3]`，前两个是 A 的 block：前 512 个 token 直接读，只算最后 88 个
+- 新版 B 的 `block_table` 是 `[3, 4, 5]`，全是新 block：600 个都要自己算
+- 看 `block_table` 就能推出来：和别人共用了几个 block，就有几 × 256 个 token 不用算
 
-我答：kernel 的具体计算不一样，batch 1 和 batch 4 用的 kernel 不一样，normalization 也不一样。
+#### 3. 新版把登记挪到算完以后，新进来的序列是不是都看不到以前的结果？
 
-- **方向对**：不同的 kernel、不同的计算顺序，在 bf16 下会有极小的数值差别。greedy 时如果某一步两个候选 token 的 logits 几乎打平，这点差别就能让选择翻过来；一旦有一个 token 不同，后面的上下文就不同了，之后全都不一样。A 和 C 前 21 个 token 一样、第 22 个才分叉，符合这种情况
-- **但不是 decode 的 batch 大小**：旧版里 A、B 一起 decode（batch 2，两条序列用的是 batch 2 的 graph，不是 4），C 单独 decode（batch 1），32 个 token 却完全一样
-- **新版里 A、C 的差别在 prefill 那一步**，有两处不同：
-  - attention 路径：A、B 那一步谁都没命中，不带 `block_table`，attention 直接用这一步算出的 k、v；C 命中了 512 个，带 `block_table`，从 cache 里读。这是两种不同的 kernel 调用（第 3 题）
-  - 那一步的 token 数：A、B 那一步一共 1200 个（新版 B 没命中，也算 600 个），C 那一步 88 个
+**背景**：新版在 `postprocess` 里才登记 hash，旧版在分配 block 时就登记（5.2）。
 
-我当时猜“attention 路径最可疑”，于是在新版上做了一个 2×2 对照实验：A 始终是同一个 prompt、始终不命中，decode 始终是 batch 2；每格只改一个变量，看 A 的输出和基准（`[P, P]`，就是上面新版的 A）差在哪：
+**我答**：是，新序列看不到以前的结果，只能自己重算。
+
+**正确答案**：只有**同一步**进来的序列彼此看不到。前面的步登记过的照样能命中。例子：
+```
+step 1：A 单独 prefill，分到 0、1、2 → postprocess 登记 {h0: 0, h1: 1}
+step 2：C（和 A 前缀相同）进来 → 查字典命中 0、1 → 只算最后 88 个
+```
+
+#### 4. 旧版里 B 命中了 A 还没算的 block，B 会算错吗？
+
+**背景**：旧版里 A 一分配就登记，B 紧接着查到 A 的 block 0、1。可这时 GPU 还没开始算，0、1 是空的（5.2 旧版 ①②）。这就是 #208 的担心。
+
+**我答**：不会，因为 A、B 在同一个 prefill 里，prefill 反正都要重新算。
+
+**正确答案**：不会，但原因是**每一层先写后读**，不是“重新算”。
+- B 并没有重算前 512 个 token（只算 88 个），前 512 个 token 的 K/V 全靠读 block 0、1
+- 一次 forward 里每一层都是：先 `store_kvcache` 把 A、B 这一步所有 token 的 K/V 写进各自的 block（A 的 600 个写进 0、1、2），再做 attention（B 按 `[0, 1, 3]` 读）
+- 所以 B 读的时候，这一层的 0、1 已经被 A 写满了（5.4 的按层图）
+
+#### 5. A、B 在 forward 里是“同时算”的，B 怎么读得到 A 写的东西？
+
+**背景**：同一步 prefill，A 的 600 个 token 和 B 的 88 个 token 在同一次 forward 里算。
+
+**我的疑问**：同时算的话，B 读 block 0、1 的时候，A 不是还没写吗？比如算到第 10 层，B 指向 0、1，里面也没有 K/V 可以拿？
+
+**正确答案**：
+- “同时”指的是 A、B 在**同一批 kernel 里**：一次矩阵乘算全部 688 行，一次 `store_kvcache` 写 688 个 token，一次 attention 处理两个序列。同一个 kernel 内部是并行的，但 **kernel 之间按顺序执行**：每一层的 store 全部做完，attention 才开始
+- 而且**每一层都有自己的一份 block 0**（第 10 层的 block 0 和第 9 层的不是同一块显存）。算到第 10 层 attention 时，第 0–10 层的 block 0、1 都已经写满了，第 11–27 层还空着，但那时也没人读它们（5.4 的图）
+
+#### 6. D 的前 10 个 block 命中了，剩下的 token 是算完 attention 以后再写进 cache 吗？
+
+**背景**：D 有 3000 个 token，前 10 个 block（2560 个 token）命中，只算后 440 个（4.4）。
+
+**我答**：只算剩下的 token，每个 attention 算完后再塞进 cache。
+
+**正确答案**：K/V 是在 attention **之前**写进去的。每一层：
+```
+① qkv 投影：算出 440 个 token 的 q、k、v（k 再做 RoPE）
+② store_kvcache：把这 440 个 k、v 写进 D 的新 block
+③ attention：读全部 3000 个 key（前 2560 个在命中的 block 里，后 440 个是 ② 刚写的）
+④ attention 的输出 → MLP → 下一层
+```
+存进 cache 的是 ① 算出来的 k、v，**不是 attention 的输出**；attention 的输出直接往后传，不存。
+
+### 7.3 真实引擎实验
+
+5.4 的实验：同一个引擎里先调用 `generate([P, P])`（A、B 在同一步 prefill），再调用 `generate([P])`（C）。P 是 600 个 token，每条生成 32 个，最后比较三条的输出。
+
+#### 7. 运行前预测：旧版里 A 和 B 生成的 32 个 token 一样吗？
+
+**我答**：不一样，B 算的时候 block 里是空的，算出来会不一样。
+
+**正确答案**：**完全一样**（实验结果）。原因见第 4、5 条：B 读 block 0、1 的时候，那一层已经被 A 写满了。
+
+#### 8. 运行前预测：新版里第 2 次调用的 C，命中的是 A 的 block 还是 B 的？
+
+**我答**：A 的。
+
+**正确答案**：**B 的**。实验输出是 `C: [3, 4, 6]`，而 B 的 block 是 `[3, 4, 5]`。新版 `postprocess` 先登记 A（`{h0: 0, h1: 1}`），再登记 B（`{h0: 3, h1: 4}`），同一个 hash 后写的覆盖先写的，字典最后指向 B 的 3、4（5.2 新版 ④-b）。
+
+#### 9. 新版里 A 和 C 从第 22 个 token 开始不同，为什么？
+
+**背景**：新版实验里 A、B 完全一样，C 和 A 前 21 个 token 一样，第 22 个开始不同。旧版里 A、B、C 三条完全一样。
+
+**我答**：kernel 的具体计算不一样，batch 1 和 batch 4 的 kernel 不一样，normalization 也不一样。
+
+**正确答案**：是**浮点精度**，不是算错。原因在 **prefill 那一步**，不在 decode 的 batch 大小（旧版里 A、B 是 batch 2、C 是 batch 1，结果却完全一样）。新版里 A 和 C 的 prefill 有两处不同：
+- **attention 路径**：A 那一步没有人命中，attention 不带 `block_table`；C 命中了，带 `block_table`。这是两种不同的 kernel
+- **那一步的 token 数**：A 那一步共 1200 个，C 那一步 88 个。矩阵乘、RMSNorm 的形状不同，cuBLAS 和 `torch.compile` 会挑不同的 kernel（和 #190 里 batch 1 用 `gemv`、batch 16 用 `cutlass` 一样）
+
+kernel 不同 → 累加顺序不同 → bf16 的最后几位不同 → 某一步两个候选 token 几乎打平时，选择就被翻过来，之后的 token 全都不同。
+
+用 2×2 对照实验确认了两个因素都会：A 的 prompt 不变、始终不命中，只改它所在的 batch，和基准 `[P, P]` 比：
 
 | A 所在的 batch | attention 不带 `block_table` | attention 带 `block_table` |
 |---|---|---|
-| prefill 共 688 个 token | `[P, S]`（S 是 88 个不命中的 token）：第 22 个开始不同 | `[P, Q88]`（Q88 命中 512 个、算 88 个）：**第 13 个**就不同，变成 `42. So 42…` |
-| prefill 共 1200 个 token | `[P, P]`：基准 | `[P, Q600]`（Q600 命中 512 个、算 600 个）：第 22 个开始不同 |
+| prefill 共 688 个 token | `[P, S]`：第 22 个开始不同 | `[P, Q88]`：**第 13 个**就不同，变成旧版 A 的 `42. So 42 operations.` |
+| prefill 共 1200 个 token | `[P, P]`：基准 | `[P, Q600]`：第 22 个开始不同 |
 
-- **两个变量都有影响**：只改路径、只改 token 数，都在第 22 个 token 分叉；两个一起改，第 13 个就分叉，而且分出来的正是旧版 A 的 `42. So 42 operations.`。右上格（688 个 token、带 `block_table`）正是旧版里 A 当时的处境
-- 两个变量都没有改变“算什么”，只改变“怎么算”：路径不同，调用的是不同的 attention kernel；token 数不同，A 自己的 600 行虽然没变，整个矩阵乘和 RMSNorm 的形状变了，cuBLAS 和 `torch.compile` 按形状挑不同的 kernel（和 #190 里 batch 1 用 `gemv`、batch 16 用 `cutlass` 是同一回事），累加顺序一变，bf16 的最后几位就不同
-- 这段生成里有两个“几乎打平”的位置：第 13 个（“ So” 和 “\n”）和第 22 个。差别小时只翻动第 22 个，差别大时连第 13 个也翻了。上面新版的 C 也是在第 22 个分叉：C 只有最后 88 个 token 用了不同的方式算，前 512 个的 K/V 来自基准那次，差别比较小
-- 所以我猜“attention 路径最可疑”只对了一半；我第 5 题里“形状不同，kernel 就不同”的直觉被证实了，只是起作用的不是 decode 的 batch 大小，而是 prefill 那一步的 token 数
-- **A 和 C 分叉不是算错了，而是浮点精度**。比较两次运行时，要让它们走同样的 kernel、同样的形状，只留下想测的那一个变量。第 3 步里 A 和 B 能完全一样，就是因为它们在同一个 batch、同一批 kernel 里
+（S 是 88 个不命中的 token；Q88、Q600 都是前 512 个命中，分别算 88 个和 600 个。）单改一个因素在第 22 个分叉；两个都改，第 13 个就分叉，而且右上格正是旧版里 A 当时的情况。
 
-**2. 脚本为什么把采样换成 argmax，而不是只把温度设得很小？** ⚠️
+所以比较两次运行时，要让它们走同样的 kernel、同样的形状。第 3 步里 A、B 能完全一样，就是因为它们在同一个 batch、同一批 kernel 里。
 
-我答：概率很接近时会被 logits 的差别掩盖，只能直接取最大的。
+#### 10. 为什么脚本把采样换成 argmax，而不是把温度设得很小？
 
-- 只对了一半。两个 token 的概率“很接近但不相等”时，温度很小其实没问题：logits 除以 1e-5，差距被放大十万倍，softmax 几乎全给最大的那个，还是选最大的
-- 真正的问题是**完全相等**，加上**随机数**：
-  - logits 是 bf16（`lm_head` 直接用 bf16 做矩阵乘，[embed_head.py L61](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L61)）。bf16 在 16 附近只能分辨到 0.125：16.0、16.03、16.06 在 bf16 里都是 16.0，所以两个候选完全相等并不罕见
-  - 完全相等时两边概率各一半，由 sampler 给每一行加的随机数（`exponential_`）决定选哪个。A、B 是两行，随机数不同，就可能选得不一样
-  - argmax 遇到相等时固定选编号小的那个，每次结果都一样
-- 旧版用原来的采样器跑的那次就是这样：“42.” 后面那个 token，“ So” 和 “\n” 打平了。greedy 时三条都选 “ So”；采样时 A、B 选了 “\n”，C 选了 “ So”。A、B 选得一样只是一半的运气，要是不一样，就会被误当成 #208 会算错的证据
+**背景**：nano-vllm 不允许温度为 0。脚本默认用 argmax（真正的 greedy），另外用原来的采样器、温度 1e-5 跑了一次。
 
-**3. 同一步里 A 的 600 个 token 全是现算的，它的 attention 带不带 `block_table`？** ⚠️
+**我答**：两个 token 概率很接近时会被 logits 的差别掩盖，只能直接取最大的。
 
-我答：prefill 时不带，decode 时带。
+**正确答案**：问题是两个候选的 logits **完全相等**，再加上采样器里的**随机数**：
+- logits 是 bf16，精度很低：在 16 附近只能分辨到 0.125，16.0、16.03、16.06 在 bf16 里都是 16.0。所以两个候选完全相等并不少见
+- 完全相等时两边概率各 50%，采样器给每一行加一个随机数（`sampler.py` 里的 `exponential_`）来决定选哪个。A、B 是两行，随机数不同，就可能选得不一样
+- argmax 遇到相等时固定选编号小的那个，每次都一样
+- 只是很接近、并不相等时没问题：温度 1e-5 会把差距放大十万倍，还是选最大的
 
-- decode 时带，✅（`flash_attn_with_kvcache` 总是按 `block_table` 读）
-- prefill 要看这一步的 batch。[model_runner.py L162](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L162)（旧版 L163）`if cu_seqlens_k[-1] > cu_seqlens_q[-1]` 比的是**整个 batch 累加**的 key 数和 query 数：
-  - 旧版：B 命中了 512 个，整个 batch 的 key 是 600 + 600 = 1200，query 是 600 + 88 = 688，1200 > 688，于是整个 batch 都准备 `block_table`，attention 里 `k, v = k_cache, v_cache`。A 虽然没命中，也从 cache 里读，读的是自己在 `store_kvcache` 里刚写的
-  - 新版：谁都没命中，1200 = 1200，不带
-- 所以同一个 A，在两个版本里走的是不同的 attention 路径，这正是第 1 题的线索
+例子：旧版用原来的采样器时，“42.” 后面那个 token，“ So” 和 “\n” 打平了。greedy 时三条都选 “ So”；采样时 A、B 选了 “\n”，C 选了 “ So”。A、B 恰好选得一样只是一半的运气；要是不一样，就会被误当成 #208 会算错的证据。
 
-**4. 这个实验能证明 #208 在 nano-vllm 里“不会算错”吗？** ⚠️
+#### 11. 同一步里 A 的 600 个 token 全是现算的，A 的 attention 带不带 `block_table`？
 
-我答：当这个序列太长了……（没写完）
+**背景**：prefill 时，[model_runner.py L162](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L162) 用 `if cu_seqlens_k[-1] > cu_seqlens_q[-1]` 决定要不要准备 `block_table`。带的话 attention 从 cache 里读 K/V；不带的话直接用这一步算出的 k、v。
 
-- **证明了什么**：在这一个场景里（两条相同的 600-token prompt、同一步进来、没有分段、单卡、greedy、生成 32 个 token），“同一步命中”和“自己算”“正常命中”的结果完全一样，和 5.4 的推理一致。但实验只能举例，证明“所有情况都不会错”靠的是代码的保证
-- **“太长”的方向是对的，它对应条件 1**：A 长到这一步的 token 预算（16384）放不下，就要分好几步算。旧版 A 一进来就把**所有**装满的 block 都登记了，包括下一步才会算的那些。能不能有别的序列在中间命中这些还没算的 block？nano-vllm 里不能：分段的那条会把这一步的预算用完，后面不接别人（[scheduler.py L42-L43](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L42-L43)），下一步又先接着算它。这是调度器的规则保证的，实验没测到。如果调度器允许别的序列和它出现在同一步（比如 mini-sglang 允许预算用完时最后放进来的那条分段），就要重新检查条件 1
-- **条件 2** 只在这份代码里成立：`store_kvcache` 和 attention 是同一个 stream 上的两个 kernel。换一个引擎，比如两件事放在不同的 stream 上，结论就要重新看
-- 多卡（tensor parallel）、更多条序列、不同的长度，都没测
+**我答**：prefill 时不带，decode 时带。
 
----
+**正确答案**：decode 时总是带。prefill 时看的是**整个 batch**，不是 A 自己：这一行比的是整个 batch 加起来的 key 数和 query 数。
+- 旧版：B 命中了 512 个，batch 的 key = 600 + 600 = 1200，query = 600 + 88 = 688，1200 > 688 → 整个 batch 都带，A 也从 cache 读（读的是自己刚写进去的）
+- 新版：谁都没命中，key = query = 1200 → 不带
 
-## 8. 还没回答的问题
+所以同一个 A，在旧版和新版里走的 attention 路径不一样，这也是第 9 条的原因之一。
 
-7.3 第 1 题的对照实验做完了（见 7.3）。下面几个问题这次先不做，以后有空再看：
+#### 12. 这个实验能证明 #208 在 nano-vllm 里“不会算错”吗？
 
-1. **既然旧版没算错，#218 把登记挪到 `postprocess` 图的是什么？** 提示：#218 的标题是 “fix chunked prefill bugs”。如果以后允许多条序列同时分段，5.4 的条件 1 还成立吗？
-2. **旧版 601、新版 600，哪个说的是实话？** 第 601 个 token 的 K/V 现在在 cache 里吗？什么时候才写进去？
-3. **#219 要不要修？** 想想 5.5 的离线批量场景，重复算的 512 个 token 和多占的 block 各值多少
-4. **PR #243 修得对不对？** 合并前检查了哪些条件？有没有漏掉的情况？
-5. **#219 的“查不到”能完整复现出来吗？** 实验里 C 命中 B 的 block，已经说明字典被覆盖了。还差后半段：让 B 先结束、它的 block 被别的请求占掉，再来一个前缀相同的请求，看它能不能命中 A 还在用的 block
+**我答**：当这个序列太长了……（没写完）
+
+**正确答案**：只能证明**这一个场景**：两条相同的 600-token prompt、同一步进来、单卡、greedy。要说“所有情况都不会错”，靠的是代码里的两个保证（5.4）：
+- **序列太长、一步放不下时会分段**（chunked prefill），旧版会把下一步才算的 block 也提前登记。没有别的序列能在中间命中它们，是因为分段的那条会用完这一步的 token 预算，后面不接别人（[scheduler.py L42-L43](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L42-L43)），下一步又先接着算它。实验没有测这种情况
+- **每层先写后读**，是因为 `store_kvcache` 和 attention 是同一个 GPU stream 上先后执行的两个 kernel。换一个引擎就要重新看
+- 多卡、更多序列、不同长度，都没测
