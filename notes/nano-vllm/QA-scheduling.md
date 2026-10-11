@@ -560,7 +560,7 @@ layer 27  |  empty   |  empty   |  empty   |  empty   |
 - **旧版里 B 和 A 完全一样**，C（正常命中）也一样。B 读的确实是 A 刚写好的数据，“同一步命中”和“正常命中”效果相同，和上面的推理一致
 - **新版里 C 命中的是 B 的 block**，和 5.2 新版 ④-b 画的一样：字典被 B 覆盖了。#219 的第二个后果在真实引擎里也出现了
 
-还没解释的现象（新版里 A 和 C 为什么分叉、旧版里为什么不分叉；为什么要用 argmax 而不是很小的温度），留在第 8 部分。
+结果里还有几个现象（新版里 A 和 C 为什么分叉、旧版里为什么不分叉；为什么要用 argmax 而不是很小的温度），我做成了分析题，答案和纠正见 7.3。
 
 #### 结论和前提
 
@@ -734,17 +734,59 @@ SGLang 和 vLLM 两列是按我对它们的了解写的，还没对照代码。m
 - ⚠️ **“A、B 在 forward 里是同时算的，那 B 怎么读得到 A 的？”**：A、B 在同一批 kernel 里并行，但 kernel 之间有先后，每层的 store 做完 attention 才开始（5.4）
 - ⚠️ **“每个 attention 算完以后再把结果塞进 cache”**：K/V 是在 attention **之前**写进去的，存的是 qkv 投影出来的 k、v，不是 attention 的输出（4.3、4.4）。我后来总结的“先算 q、k、v，再写进 KV cache，再做 attention”是对的 ✅
 
+### 7.3 真实引擎实验后的分析题
+
+5.4 的实验跑完以后，我答了四道分析题。
+
+**1. 新版里 A 和 B 一样，A 和 C 却在第 22 个 token 分叉，为什么？** ⚠️
+
+我答：kernel 的具体计算不一样，batch 1 和 batch 4 用的 kernel 不一样，normalization 也不一样。
+
+- **方向对**：不同的 kernel、不同的计算顺序，在 bf16 下会有极小的数值差别。greedy 时如果某一步两个候选 token 的 logits 几乎打平，这点差别就能让选择翻过来；一旦有一个 token 不同，后面的上下文就不同了，之后全都不一样。A 和 C 前 21 个 token 一样、第 22 个才分叉，符合这种情况
+- **但不是 decode 的 batch 大小**：旧版里 A、B 一起 decode（batch 2，两条序列用的是 batch 2 的 graph，不是 4），C 单独 decode（batch 1），32 个 token 却完全一样
+- **新版里 A、C 的差别在 prefill 那一步**，有两处不同：
+  - attention 路径：A、B 那一步谁都没命中，不带 `block_table`，attention 直接用这一步算出的 k、v；C 命中了 512 个，带 `block_table`，从 cache 里读。这是两种不同的 kernel 调用（第 3 题）
+  - 那一步的 token 数：A、B 那一步一共 1200 个（新版 B 没命中，也算 600 个），C 那一步 88 个
+- 旧版里 A、B、C 的 prefill 都带 `block_table`，结果完全一样，所以 **attention 路径最可疑**。要确定，还得做一个只改路径、不改其他东西的对照实验（第 8 部分第 1 题）
+- normalization：RMSNorm 也是 `torch.compile` 按形状生成的 kernel（#190 里见过 `per` 和 `red` 两种），形状不同可能用不同的 kernel；但旧版的数据说明，这次的形状差别（688 行 vs 88 行）没有造成分叉
+
+**2. 脚本为什么把采样换成 argmax，而不是只把温度设得很小？** ⚠️
+
+我答：概率很接近时会被 logits 的差别掩盖，只能直接取最大的。
+
+- 只对了一半。两个 token 的概率“很接近但不相等”时，温度很小其实没问题：logits 除以 1e-5，差距被放大十万倍，softmax 几乎全给最大的那个，还是选最大的
+- 真正的问题是**完全相等**，加上**随机数**：
+  - logits 是 bf16（`lm_head` 直接用 bf16 做矩阵乘，[embed_head.py L61](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L61)）。bf16 在 16 附近只能分辨到 0.125：16.0、16.03、16.06 在 bf16 里都是 16.0，所以两个候选完全相等并不罕见
+  - 完全相等时两边概率各一半，由 sampler 给每一行加的随机数（`exponential_`）决定选哪个。A、B 是两行，随机数不同，就可能选得不一样
+  - argmax 遇到相等时固定选编号小的那个，每次结果都一样
+- 旧版用原来的采样器跑的那次就是这样：“42.” 后面那个 token，“ So” 和 “\n” 打平了。greedy 时三条都选 “ So”；采样时 A、B 选了 “\n”，C 选了 “ So”。A、B 选得一样只是一半的运气，要是不一样，就会被误当成 #208 会算错的证据
+
+**3. 同一步里 A 的 600 个 token 全是现算的，它的 attention 带不带 `block_table`？** ⚠️
+
+我答：prefill 时不带，decode 时带。
+
+- decode 时带，✅（`flash_attn_with_kvcache` 总是按 `block_table` 读）
+- prefill 要看这一步的 batch。[model_runner.py L162](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L162)（旧版 L163）`if cu_seqlens_k[-1] > cu_seqlens_q[-1]` 比的是**整个 batch 累加**的 key 数和 query 数：
+  - 旧版：B 命中了 512 个，整个 batch 的 key 是 600 + 600 = 1200，query 是 600 + 88 = 688，1200 > 688，于是整个 batch 都准备 `block_table`，attention 里 `k, v = k_cache, v_cache`。A 虽然没命中，也从 cache 里读，读的是自己在 `store_kvcache` 里刚写的
+  - 新版：谁都没命中，1200 = 1200，不带
+- 所以同一个 A，在两个版本里走的是不同的 attention 路径，这正是第 1 题的线索
+
+**4. 这个实验能证明 #208 在 nano-vllm 里“不会算错”吗？** ⚠️
+
+我答：当这个序列太长了……（没写完）
+
+- **证明了什么**：在这一个场景里（两条相同的 600-token prompt、同一步进来、没有分段、单卡、greedy、生成 32 个 token），“同一步命中”和“自己算”“正常命中”的结果完全一样，和 5.4 的推理一致。但实验只能举例，证明“所有情况都不会错”靠的是代码的保证
+- **“太长”的方向是对的，它对应条件 1**：A 长到这一步的 token 预算（16384）放不下，就要分好几步算。旧版 A 一进来就把**所有**装满的 block 都登记了，包括下一步才会算的那些。能不能有别的序列在中间命中这些还没算的 block？nano-vllm 里不能：分段的那条会把这一步的预算用完，后面不接别人（[scheduler.py L42-L43](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L42-L43)），下一步又先接着算它。这是调度器的规则保证的，实验没测到。如果调度器允许别的序列和它出现在同一步（比如 mini-sglang 允许预算用完时最后放进来的那条分段），就要重新检查条件 1
+- **条件 2** 只在这份代码里成立：`store_kvcache` 和 attention 是同一个 stream 上的两个 kernel。换一个引擎，比如两件事放在不同的 stream 上，结论就要重新看
+- 多卡（tensor parallel）、更多条序列、不同的长度，都没测
+
 ---
 
 ## 8. 还没回答的问题
 
-5.4 的实验做完了，下面几个现象和问题还要我自己解释（前三题来自实验结果）：
-
-1. **新版里 A 和 C 在第 22 个 token 分叉，旧版里不分叉，为什么？** 线索：旧版里 A、B 一起 decode（batch 2），C 单独 decode（batch 1），可三条完全一样，所以至少在这次运行里，batch 大小不是原因。再看：同样是没命中任何 block 的 A，旧版生成 `42. So 42 operations.`，新版生成 `42.\n- **Lazy:** …`。旧版和新版的那一步 batch 里有什么不同？`model_runner.py` 第 162 行（旧版第 163 行）`if cu_seqlens_k[-1] > cu_seqlens_q[-1]` 是对单个序列还是整个 batch 判断的？A 在两个版本里走的是不是同一条 attention 路径？想验证的话：在新版上让 A 所在的 batch 里有一条命中缓存的序列，看 A 的输出会不会变成旧版那样
-2. **为什么要把采样换成 argmax，而不是只把温度设得很小？** 线索：旧版用原来的采样器时，在 “42.” 后面那个 token，A、B 选了 “\n”，C 选了 “ So”，而 greedy 时三条都选 “ So”。看 `sampler.py` 里的 `exponential_`；如果那一步两个候选 token 的 logits 在 bf16 下完全相等，argmax 和加了随机数的采样会怎么选？A、B 恰好选了同一个，是必然的吗？如果没选一样，会不会让人误以为 #208 是 bug？
-3. **这个实验能证明 #208 在 nano-vllm 里“不会算错”吗？证明到什么程度？** 对照 5.4 的两个条件，这次覆盖了哪种情况，没覆盖哪种？
-4. **既然旧版没算错，#218 把登记挪到 `postprocess` 图的是什么？** 提示：#218 的标题是 “fix chunked prefill bugs”。如果以后允许多条序列同时分段，5.4 的条件 1 还成立吗？
-5. **旧版 601、新版 600，哪个说的是实话？** 第 601 个 token 的 K/V 现在在 cache 里吗？什么时候才写进去？
-6. **#219 要不要修？** 想想 5.5 的离线批量场景，重复算的 512 个 token 和多占的 block 各值多少
-7. **PR #243 修得对不对？** 合并前检查了哪些条件？有没有漏掉的情况？
-8. **#219 的“查不到”能完整复现出来吗？** 实验里 C 命中 B 的 block，已经说明字典被覆盖了。还差后半段：让 B 先结束、它的 block 被别的请求占掉，再来一个前缀相同的请求，看它能不能命中 A 还在用的 block
+1. **第 7.3 题 1 的原因，到底是 attention 路径，还是 prefill 那一步的 token 数？** 设计一个只改一个变量的对照实验。比如在新版上，让 A 所在的 batch 里多一条命中缓存的序列，A 的 attention 就会改走带 `block_table` 的路径，看 A 的输出会不会变成旧版那样
+2. **既然旧版没算错，#218 把登记挪到 `postprocess` 图的是什么？** 提示：#218 的标题是 “fix chunked prefill bugs”。如果以后允许多条序列同时分段，5.4 的条件 1 还成立吗？
+3. **旧版 601、新版 600，哪个说的是实话？** 第 601 个 token 的 K/V 现在在 cache 里吗？什么时候才写进去？
+4. **#219 要不要修？** 想想 5.5 的离线批量场景，重复算的 512 个 token 和多占的 block 各值多少
+5. **PR #243 修得对不对？** 合并前检查了哪些条件？有没有漏掉的情况？
+6. **#219 的“查不到”能完整复现出来吗？** 实验里 C 命中 B 的 block，已经说明字典被覆盖了。还差后半段：让 B 先结束、它的 block 被别的请求占掉，再来一个前缀相同的请求，看它能不能命中 A 还在用的 block
