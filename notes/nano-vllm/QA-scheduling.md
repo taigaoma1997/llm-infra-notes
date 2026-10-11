@@ -2,7 +2,7 @@
 
 读 nano-vllm [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) 和 [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) 时，我问过的问题和答案。这两个 issue 讲的是 prefix cache 里一个很小的细节，可要看懂它，得先弄清调度器每一步在做什么、block 怎么被共享、命中以后怎么算。问着问着就延伸到了调度器的整体设计：continuous batching、预留和抢占、prefill 和 decode 要不要放在同一步。
 
-用中文写，方便自己复习。代码都对应 upstream [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)；“旧版”指 #218 合并之前的 `f64d821~1`（[`44a51af`](https://github.com/GeeeekExplorer/nano-vllm/tree/44a51afc8a7f60e75ce3f4ee94632430eff9de65)）。2026-10-10 整理。
+用中文写，方便自己复习；英文的整理版见 [#219 write-up](issues/219-same-step-prefix-sharing.md)。代码都对应 upstream [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)；“旧版”指 #218 合并之前的 `f64d821~1`（[`44a51af`](https://github.com/GeeeekExplorer/nano-vllm/tree/44a51afc8a7f60e75ce3f4ee94632430eff9de65)）。2026-10-10 整理。
 
 **结论先说**
 

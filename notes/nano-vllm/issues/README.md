@@ -8,6 +8,7 @@ One page per issue I reproduced. Create one with `scripts/new.sh issue nano-vllm
 | [#279](https://github.com/GeeeekExplorer/nano-vllm/issues/279) (reported by me) | Prompt longer than the whole KV cache blocks the queue and crashes | PR open ([#280](https://github.com/GeeeekExplorer/nano-vllm/pull/280)) | [274, Case 2](274-kv-cache-exhausted-assert.md#the-failing-cases) |
 | [#170](https://github.com/GeeeekExplorer/nano-vllm/issues/170) | `RMSNorm` overwrites its fp32 input, which corrupts the residual | Root cause found. Compared my fix with the 3 open PRs: only #171 fixes both paths, none is slower | [170](170-rmsnorm-fp32-residual.md) |
 | [#190](https://github.com/GeeeekExplorer/nano-vllm/issues/190) / [#106](https://github.com/GeeeekExplorer/nano-vllm/issues/106) | CUDA graph replay fails once a sequence grows past `max_model_len` | Reproduced on upstream. The issue's suggested fix (one extra buffer column) only moves the crash. Tested the open PRs: #270 fixes the root cause, #191 only avoids the crash. Posted the reproduction on #270; its author then added `Fixes #190` | [190](190-cuda-graph-block-tables.md) |
+| [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) / [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) | Identical prefixes prefilled in the same step get separate blocks; #208 is the other side of the same change | Reproduced both sides (scheduler simulation, real engine). #208 does not give wrong results here; #219 is a real cost. PR #243 open | [219](219-same-step-prefix-sharing.md) |
 
 ## Backlog
 
@@ -23,7 +24,6 @@ From a pass over all 111 issues on 2026-09-25, checked against commit `bb823b3`.
 
 | Issue | Question | Upstream PR |
 |---|---|---|
-| [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) | Identical prefixes prefilled in the same step get separate blocks. Measured on `bb823b3` (scheduler simulation, 8-block cache): two identical 600-token prompts in one step leave 2 blocks free, so each took 3 blocks instead of sharing 2. This is the other side of the #208 fix | [#243](https://github.com/GeeeekExplorer/nano-vllm/pull/243) |
 | [#240](https://github.com/GeeeekExplorer/nano-vllm/issues/240) | Does `may_append` allocate one token too late? (Probably not: see [#150](https://github.com/GeeeekExplorer/nano-vllm/issues/150).) | |
 | [#175](https://github.com/GeeeekExplorer/nano-vllm/issues/175) | CUDA Graph decode still allocates tensors every step (performance) | [#176](https://github.com/GeeeekExplorer/nano-vllm/pull/176), [#253](https://github.com/GeeeekExplorer/nano-vllm/pull/253) |
 
@@ -33,7 +33,6 @@ From a pass over all 111 issues on 2026-09-25, checked against commit `bb823b3`.
 |---|---|
 | [#114](https://github.com/GeeeekExplorer/nano-vllm/issues/114) / [#144](https://github.com/GeeeekExplorer/nano-vllm/issues/144) | A prompt that is a whole number of blocks and fully cached gives `seqlen_q = 0` and crashes. Measured (scheduler simulation, two identical 512-token prompts in different steps): on `f64d821~1` the second one hits both blocks and has nothing left to compute; on `bb823b3` it reuses one block and recomputes the last. The crash itself happens inside the model, so it needs the real engine |
 | [#163](https://github.com/GeeeekExplorer/nano-vllm/issues/163) | A recycled block keeps its old hash, so a later request can hit stale content |
-| [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) | A request can hit blocks that an earlier request in the same prefill batch has not written yet. Measured on `f64d821~1` with the #219 scenario: 4 blocks free, so the second prompt shared blocks that had not been computed yet. The fix (register hashes in `postprocess`) is what causes #219 |
 
 **Questions that test understanding:** [#20](https://github.com/GeeeekExplorer/nano-vllm/issues/20), [#143](https://github.com/GeeeekExplorer/nano-vllm/issues/143) (chained hashes), [#30](https://github.com/GeeeekExplorer/nano-vllm/issues/30), [#91](https://github.com/GeeeekExplorer/nano-vllm/issues/91) (`can_append`), [#115](https://github.com/GeeeekExplorer/nano-vllm/issues/115) (partly filled blocks), [#107](https://github.com/GeeeekExplorer/nano-vllm/issues/107) (CUDA Graph buffer sizes), [#80](https://github.com/GeeeekExplorer/nano-vllm/issues/80) (warmup size), [#155](https://github.com/GeeeekExplorer/nano-vllm/issues/155) with [#246](https://github.com/GeeeekExplorer/nano-vllm/issues/246) (shared-memory RPC).
 
