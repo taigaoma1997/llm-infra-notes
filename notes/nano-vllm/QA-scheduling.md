@@ -1,0 +1,483 @@
+# nano-vllm 问答：调度和 prefix cache
+
+读 nano-vllm [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) 和 [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) 时，我问过的问题和答案。这两个 issue 讲的是 prefix cache 里一个很小的细节，可要看懂它，得先弄清调度器每一步在做什么、block 怎么被共享、命中以后怎么算。问着问着就延伸到了调度器的整体设计：continuous batching、预留和抢占、prefill 和 decode 要不要放在同一步。
+
+用中文写，方便自己复习。代码都对应 upstream [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)；“旧版”指 #218 合并之前的 `f64d821~1`（[`44a51af`](https://github.com/GeeeekExplorer/nano-vllm/tree/44a51afc8a7f60e75ce3f4ee94632430eff9de65)）。2026-10-10 整理，#219 做完后再补结论。
+
+**目录**（先看第 1 部分建立全局，再按顺序往下）
+
+1. 全局：调度器每一步在做什么（流程图 + 一次具体的运行）
+2. 术语
+3. prefix cache：block 怎么被共享（hash、字典、`ref_count`、一个 block 的一生）
+4. 命中以后怎么算：一部分 K/V 读 cache，一部分现算
+5. 案例：#208 和 #219（时间线、旧版和新版、复现、推理、PR #243）
+6. 调度器的设计取舍：continuous batching、预留和抢占、混合 batch，和 mini-sglang、SGLang、vLLM 对比
+7. 我的理解和纠正
+8. 还没回答的问题
+
+---
+
+## 1. 全局：调度器每一步在做什么
+
+调度器（`Scheduler`）决定每一步让哪些序列上 GPU。nano-vllm 的推理是一步一步走的：每一步先调度，再让 GPU 做一次 forward，最后收结果。一步要么是 **prefill**（新序列的 prompt 第一次过模型），要么是 **decode**（已经在跑的序列各生成 1 个 token），不会混在一起。
+
+```mermaid
+flowchart TD
+  G["generate()<br/>所有请求进 waiting 队列"] --> S["schedule()：开始新的一步"]
+  S --> Q{"waiting 队头<br/>接得进来吗？"}
+  Q -->|"接得进"| P["prefill 步<br/>接进来的序列一起算"]
+  Q -->|"一个都接不进"| D["decode 步<br/>running 里每个序列 +1 token"]
+  P --> F["GPU forward<br/>每一层先写 K/V，再做 attention"]
+  D --> F
+  F --> PP["postprocess()<br/>登记装满的 block，释放结束的序列"]
+  PP --> E{"waiting 和 running<br/>都空了吗？"}
+  E -->|"没有"| S
+  E -->|"空了"| R["generate() 返回结果"]
+```
+
+| 框 | 做什么 | 代码 |
+|---|---|---|
+| `generate()` | 把所有 prompt 变成序列，按顺序放进 waiting（先进先出） | [llm_engine.py L60-L70](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py#L60-L70) |
+| 接得进来吗？ | 从 waiting **队头**一个个试，直到三者之一：这一步的 token 预算用完（`max_num_batched_tokens`，默认 16384）/ 这一步已经有 512 个序列（`max_num_seqs`）/ 队头那条要的 block 不够。**不会跳过队头**去接后面更短的。接进来时先查 prefix cache，命中的 block 直接共用，其余分配新 block。只有这一步的第一条能分段（chunked prefill），后面的放不下整条就停 | [scheduler.py L30-L52](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L30-L52) |
+| prefill 步 | 只要接进了至少一个序列，这一步就只做 prefill，正在 decode 的序列这一步暂停 | [L54-L55](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L54-L55) |
+| decode 步 | running 里每个序列送 1 个 token（每步最多 512 个序列）。跨进新 block（`len % 256 == 1`）时要一个新 block，没有空的就**抢占** running 队尾的序列 | [L57-L73](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L57-L73) |
+| GPU forward | 每一层先把这一步所有 token 的 K/V 写进各自的 block，再做 attention（第 4 部分） | [attention.py L62-L70](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L62-L70) |
+| `postprocess()` | 新版在这里给刚装满的 block 算 hash 并登记；每个序列追加新 token；遇到 EOS 或到达 `max_tokens` 的结束，释放 block | [scheduler.py L81-L92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L81-L92) |
+
+### 一次具体的运行
+
+假设 KV cache 有 160 个 block（约 4 万个 token，差不多是我 8 GB 显卡上的量），一批 prompt 每条 600 个 token（占 3 个 block），`max_tokens=100`：
+
+```
+step 1     prefill 27 条（token 预算 16384 ÷ 600 = 27）
+step 2     prefill 26 条（只剩够 26 条的 block）→ running 53 条，空 block 剩 1 个
+step 3     队头要 3 个 block，只有 1 个，接不进 → decode：53 条各生成 1 个 token
+…          每一步都先试着接新的，接不进就 decode
+step 50    A 遇到 EOS，postprocess 里结束，释放 3 个 block → 空 block 4 个
+step 51    队头要 3 个，够了 → prefill 1 条（这一步其余 52 条暂停）
+step 52    又接不进了 → decode 53 条
+```
+
+从这个例子能看出三件事，后面会分别展开：
+- **batch 每一步都在重新组**：有序列结束，下一步就有新的补进来，不用等一整批做完（6.1）
+- **进来时只给 prompt 分 block**：后面生成的 token 要的 block 没有预留，可能不够，不够就抢占（6.2）
+- **接 1 条新序列，52 条正在生成的都要停一步**：prefill 和 decode 不在同一步（6.3）
+
+---
+
+## 2. 术语
+
+| 词 | 意思 | 代码里 |
+|---|---|---|
+| 一步（step） | 调度一次、GPU forward 一次、收一次结果 | `LLMEngine.step` |
+| prefill | 把 prompt 的 token 送进模型，算出它们的 K/V，并生成第一个 token | `is_prefill=True` |
+| decode | 每个序列送 1 个 token（上一步生成的那个），生成下一个 | `is_prefill=False` |
+| waiting / running | 还没进来（或被抢占回来）的序列 / 已经进来、正在生成的序列 | `Scheduler.waiting`、`Scheduler.running` |
+| block | KV cache 里连续 256 个 token 的位置。一个序列的 K/V 分散存在几个 block 里 | `BlockManager.blocks` |
+| `block_table` | 一个序列按顺序用到的 block 编号，比如 `[5, 9, 12]` | `seq.block_table` |
+| slot | KV cache 里一个 token 的位置：`block 编号 × 256 + 在 block 里的第几个` | `slot_mapping` |
+| hash、`hash_to_block_id` | 一个装满的 block 由它的 256 个 token（连同前面所有 token）算出的整数；字典记录“这个 hash 在哪个 block” | `compute_hash`、`hash_to_block_id` |
+| `ref_count` | 一个 block 现在被几个序列用着 | `Block.ref_count` |
+| `num_cached_tokens` | 这个序列开头有多少个 token 的 K/V 已经在 cache 里，这一步不用算 | `seq.num_cached_tokens` |
+| `num_scheduled_tokens` | 这一步要算这个序列的多少个 token | `seq.num_scheduled_tokens` |
+| 抢占（preempt） | block 不够时，把一个 running 序列踢回 waiting、释放它的 block，之后重新 prefill | `Scheduler.preempt` |
+
+---
+
+## 3. prefix cache：block 怎么被共享
+
+很多请求开头是一样的：同一段 system prompt、多轮对话里上一轮的内容。开头一样，这段的 K/V 也一样，只需要算一次、存一份。这一部分讲 nano-vllm 怎么认出“一样”，以及共享的 block 怎么管理。
+
+后面第 3 到第 5 部分都用同一个例子：**KV cache 一共 8 个 block，空闲列表是 `0, 1, …, 7`；A、B 是同一个 600-token 的 prompt（`[7] * 600`）。**
+
+### 3.1 怎么认出“一样”：hash 和字典
+
+每个**装满的** block，用它的 256 个 token 算一个 hash，并且把前一个 block 的 hash 也算进去。这样 hash 相同，就说明“从开头到这里的所有 token 都相同”，不只是这 256 个相同。
+
+```
+A 的 600 个 token
+├─ 第 0 块：token 0–255    装满 → h0 = hash(这 256 个 token)
+├─ 第 1 块：token 256–511  装满 → h1 = hash(h0, 这 256 个 token)
+└─ 第 2 块：token 512–599  只有 88 个，没装满 → 不算 hash，不能共享
+
+A 拿到 block 0、1、2；登记以后：hash_to_block_id = {h0: 0, h1: 1}
+```
+
+新序列进来时，算自己每个 block 的 hash 去查字典，查到了就直接用那个 block（`ref_count + 1`），这段 token 不用再算。代码：[`compute_hash`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L35-L41)、[`can_allocate`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L58-L73)（查）、[`allocate`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L75-L92)（用）。
+
+两个限制：
+- **没装满的 block 永远不共享**，因为不算 hash。prompt 只有 200 个 token，什么都共享不了
+- 新版 `can_allocate` 只查前 `num_blocks - 1` 个 block（[L62](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L62)），最后一块就算装满了也重算：至少要留 1 个 token 现算，才能拿到最后位置的 logits 去采样（4.1）
+
+### 3.2 什么时候查字典，什么时候登记
+
+“查”和“登记”是两件事，发生在不同的时刻：
+
+| | 查字典（用别人的 block） | 登记（让以后的序列能用自己的 block） |
+|---|---|---|
+| **prefill**（序列刚进来） | 查：只在 `if not seq.block_table:` 时，也就是序列刚进来（或被抢占后重新进来）（[scheduler.py L35-L45](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L35-L45)） | 旧版：分配 block 时就登记。新版：`postprocess` → [`hash_blocks`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L110-L120)，算完才登记 |
+| **decode**（每步 +1 token） | **从来不查**：[`may_append`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L106-L108) 只是从空闲列表拿一个新 block | 某个 block 刚好装满时登记，留给以后进来的序列（比如多轮对话的下一轮）。旧版在 `may_append`（`len % 256 == 0`），新版在 `hash_blocks` |
+
+一句话总结这一节，也是理解 #219 的关键：
+
+> **共享只发生在序列进来的那一刻（prefill 查字典），能共享的只有装满的 block，而且只能共享“已经登记”的 block。旧版分配时就登记，新版算完才登记，区别只在同一步进来的序列之间。**
+
+所以 decode 时就算 A、B 一模一样、生成的 token 也一样，它们新 token 所在的 block 也是两份，两个版本都是这样。
+
+### 3.3 一个 block 的一生
+
+block 用完以后不会马上被“清掉”。这一点决定了已经结束的序列，它的 block 还能不能被后来的序列命中：
+
+```mermaid
+flowchart TD
+  F["空闲"] -->|"分配给一个序列"| U["在用，还没登记"]
+  U -->|"装满，登记 hash"| R["在用，已登记<br/>别的序列能命中"]
+  R -->|"所有使用者都结束<br/>ref_count = 0"| C["空闲，但登记还在<br/>K/V 也还在"]
+  C -->|"新序列命中它<br/>从空闲列表拿回来"| R
+  C -->|"被分给别的序列<br/>删掉旧登记"| U
+  U -->|"使用者结束"| F
+```
+
+| 变化 | 发生了什么 | 代码 |
+|---|---|---|
+| 分配 | 从空闲列表队头拿一个，`ref_count = 1` | [`_allocate_block` L43-L51](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L43-L51) |
+| 登记 | 字典里记下 `hash → block`；又有序列命中时 `ref_count + 1` | [`hash_blocks`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L110-L120)、[`allocate` L83-L84](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L83-L84) |
+| 使用者结束 | 每个使用者结束时 `ref_count - 1`，到 0 才放回空闲列表**队尾**；K/V 和字典里的那条都不动 | [`deallocate` L94-L101](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L94-L101) |
+| 结束后又被命中 | 把它从空闲列表里拿回来，接着用 | [`allocate` L85-L88](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L85-L88) |
+| 被分给别的序列 | 先删掉字典里指向它的旧登记，再分出去，K/V 会被新内容覆盖（不删的话就是 #163 的 bug：命中内容已经被覆盖的 block） | [L47-L48](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L47-L48) |
+
+`ref_count` 就是共享的记账方式。A、B 共用 block 0 时它是 2；A 先结束，变成 1，block 不动，B 接着用；B 也结束，变成 0，才放回空闲列表：
+
+```python
+for block_id in reversed(seq.block_table):
+    block = self.blocks[block_id]
+    block.ref_count -= 1          # 只减自己那一份
+    if block.ref_count == 0:      # 没人用了才放回空闲列表
+        self._deallocate_block(block_id)
+```
+
+---
+
+## 4. 命中以后怎么算：一部分 K/V 读 cache，一部分现算
+
+prefix cache 省的是计算：命中的 token 不用再过模型。可后面的 token 做 attention 时，还是要看到它们的 K/V。这一部分讲这两件事怎么同时成立。这也是第 5 部分判断 #208 会不会算错的基础。
+
+### 4.1 为什么可以只算后半段
+
+模型是 causal 的，每个 token 只看得到自己和前面的 token：
+
+```
+第 L 层 token i 的 K、V  ←  第 L-1 层 token 0…i 的输出  ←  …  ←  输入 token 0…i
+```
+
+所以 token 0–511 在 28 层里的 K/V，完全由 token 0–511 决定，和后面是什么 token、谁算、什么时候算都无关。A 和 B 前 512 个 token 一样，算出来的 K/V 就一模一样。
+
+前缀 token 除了 K/V 还有用吗？没有：
+- 它们每一层的输出，只是用来算下一层的 K/V，而 28 层的 K/V 都已经在 cache 里
+- 它们自己的 logits 用不上，采样下一个 token 只要**最后一个**位置的 logits
+
+所以前缀 token 根本不用再过一遍模型；但至少要留 1 个 token 现算，才有最后位置的 logits（[#114](https://github.com/GeeeekExplorer/nano-vllm/issues/114) 的 `seqlen_q = 0` 崩溃，就是一个都没留）。
+
+### 4.2 代码里怎么做：query 只有新 token，key 是全部 token
+
+以 B 为例：600 个 token，前 512 个命中 block 0、1。[`prepare_prefill`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L128-L170) 给 B 准备的输入：
+
+| 变量 | B 的值 | 意思 |
+|---|---|---|
+| `start = num_cached_tokens` | 512 | 从第 512 个 token 开始算 |
+| `input_ids` | token 512–599 | 只送 88 个 token 进模型 |
+| `positions` | 512–599 | 真实位置，RoPE 要用 |
+| `seqlen_q` / `seqlen_k` | 88 / 600 | 88 个 query，要看 600 个 key |
+| `slot_mapping` | block 3 里的 88 个位置 | 新 token 的 K/V 写到哪 |
+| `block_tables` | `[[0, 1, 3]]` | 600 个 key 分别在哪些 block |
+
+每一层（[qwen3.py L77-L86](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L77-L86) → [attention.py L62-L70](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L62-L70)）：
+
+```
+qkv 投影：只有 88 行            → 88 个 q、k、v（矩阵乘只算 88 行，不是 600 行）
+RoPE：用位置 512–599 旋转 q、k   → 和“从头算”时这 88 个 token 得到的一样
+store_kvcache：88 个 k、v 写进 block 3
+attention：q = 88 行；k、v = 整个 cache，按 block_table [0, 1, 3] 读出 600 个 key
+```
+
+query 比 key 少时，causal mask 按“右下角对齐”：第 j 个 query 对应位置 512 + j，能看到位置 0 到 512 + j 的 key：
+
+```
+              key 位置 →   0 … 511  │ 512  513  …  599
+query（位置 512）           ✔ … ✔   │  ✔    ✗   …   ✗
+query（位置 513）           ✔ … ✔   │  ✔    ✔   …   ✗
+…
+query（位置 599）           ✔ … ✔   │  ✔    ✔   …   ✔
+                            ↑ 从 block 0、1 读   ↑ 这一层刚写进 block 3
+```
+
+cache 里存的 K 是**已经做过 RoPE** 的（L85 先旋转，L86 再进 attention、写进 cache），用的是各自的真实位置 0–511；新 token 用 512–599 旋转，位置编码对得上。
+
+### 4.3 K/V 是在 forward 里一层一层写进去的
+
+KV cache 是启动时一次性分配好的一整块张量（[model_runner.py L115-L120](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L115-L120)），每一层拿到属于自己的一片：
+
+```python
+self.kv_cache = torch.empty(2, 28 层, block 数, 256, 8 个 KV 头, 128)
+module.k_cache = self.kv_cache[0, layer_id]
+```
+
+所以“block 5”指的是每一层里第 5 块的 256 个位置，28 层各有一份。block 不会移动，也不会合并：一个序列的 K/V 分散在几个不连续的 block 里，`block_table` 按顺序记下来，attention 按表去读（这就是 PagedAttention，[#190](issues/190-cuda-graph-block-tables.md) 里的 `block_tables` 就是这张表）。
+
+一次 forward 里，每一层都是先写后读：
+
+```
+第 0 层：算出这一步所有 token 的 q、k、v
+         store_kvcache：把 k、v 写进第 0 层 cache 的 slot   ← 写
+         attention：按 block_table 读第 0 层 cache 里的历史  ← 读
+第 1 层：写第 1 层，再读第 1 层
+…
+第 27 层
+```
+
+写到哪里由 `slot_mapping` 决定。decode 时每个序列只有 1 个新 token（[L181](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L181)）：
+
+```python
+slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1)
+```
+
+写入的 kernel（[attention.py L11-L31](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L11-L31)）：每个 token 读自己的 slot，`slot == -1` 就跳过（#190 里 CUDA graph 的空座位），否则把 k、v 写到 `slot × D` 的位置。forward 结束时，K/V 早就在各自的 block 里了。
+
+### 4.4 同一个机制，几种用法
+
+| 场景 | query（这一步送进来的） | key（要看的） |
+|---|---|---|
+| 普通 prefill（没命中） | 全部 600 个 | 600 个，全是这一步算的 |
+| prefix cache 命中 | 后 88 个 | 600 个：512 个从 cache 读，88 个这一步算 |
+| chunked prefill 的第 2 段 | 这一段的 token | 前几段从 cache 读 + 这一段 |
+| decode | 1 个 | 全部历史从 cache 读 + 这 1 个 |
+
+**query 是这一步的新 token，key 是到目前为止的所有 token**。decode 就是 query 长度为 1 的 prefill。省下的是矩阵乘（B 的 28 层都只算 88 行）；attention 要看的 key 还是 600 个，这部分省不了。
+
+---
+
+## 5. 案例：#208 和 #219
+
+有了前面的基础，这两个 issue 其实在争同一件事：**“登记”放在哪一刻**。登记得早，同一步里后进来的序列就能共用前面的 block，省了计算，但用的是还没算的 block；登记得晚，安全，但同一步里的相同前缀共享不了。
+
+### 5.1 时间线
+
+```
+2026-04-21  #208：同一步 prefill 里，后面的序列会命中前面序列“还没算”的 block
+2026-04-21  评论里 fishAndShrimp 反驳：在 nano-vllm 里不会算错 → 04-23 报告人自己关了 issue
+2026-04-26  维护者合并 #218（“fix chunked prefill bugs and refactor”，f64d821，合并后就是 bb823b3）：
+            hash 改到 postprocess 的 hash_blocks 里才登记
+2026-04-28  #219（fishAndShrimp）：同一步的两个相同前缀互相看不到，各占一份 block
+2026-06-15  PR #243（fishAndShrimp）：在 hash_blocks 里事后合并
+```
+
+所以这是一道题：**#208 到底是不是 bug？如果是，防它的代价就是 #219，值不值？**
+
+“同一步”是什么意思：prefill 循环是一个 `while`（第 1 部分的“接得进来吗”），A 放得下就给 A 分 block，接着看 B，B 也放得下就给 B 分。A、B 进同一个列表，在同一次 forward 里一起算。
+
+### 5.2 旧版和新版各走一遍
+
+**旧版：分配时就登记**（[旧版 `allocate` L79-L81](https://github.com/GeeeekExplorer/nano-vllm/blob/44a51afc8a7f60e75ce3f4ee94632430eff9de65/nanovllm/engine/block_manager.py#L59-L82)）
+
+```
+schedule
+   A：查字典，空的 → 分配 0、1、2，马上登记 {h0: 0, h1: 1}
+   B：查字典 → h0 命中 0，h1 命中 1 → 直接用 0、1（ref_count 变 2），第 2 块分配新的 3
+      B 前 512 个 token 不用算，只算 88 个
+GPU：A 算 600 个，写进 0、1、2；B 算 88 个，写进 3；B 前 512 个 token 的 K/V 从 0、1 里读
+```
+
+#208 担心的就是这里：B 在 schedule 时就“命中”了 0、1，可那时 0、1 里什么都还没有，A 要到 GPU 那一步才算。会不会真的算错，见 5.4。
+
+**新版：算完才登记**
+
+```
+schedule
+   A：查字典，空的 → 分配 0、1、2，不登记
+   B：查字典，还是空的 → 分配 3、4、5，不登记
+GPU：A、B 各算 600 个 token，写进 0、1、2 和 3、4、5（0≡3，1≡4，内容一模一样）
+postprocess
+   A：登记 {h0: 0, h1: 1}
+   B：登记 {h0: 3, h1: 4}   ← 覆盖了 A 的
+```
+
+这样 #208 的情况就不会发生了：字典里只有已经算完的 block。代价就是 #219（5.5）。
+
+| | 旧版 | 新版（#218） | 新版 + PR #243 |
+|---|---|---|---|
+| 什么时候登记 | 分配时，GPU 还没算 | 算完以后 | 算完以后，发现重复就合并 |
+| B 在这一步能用上 A 的 block 吗 | 能 | 不能 | 算完以后才合并 |
+| B 要算几个 token | 88 | 600 | 600 |
+| 这一步结束后占几个 block | 4 | 6 | 4 |
+| 风险 | #208：命中了还没算的 block | #219：重复存储，以后还可能查不到 | 留到 #219 做完再判断 |
+
+### 5.3 复现：调度器模拟
+
+不用 GPU：脚本直接驱动真实的 `Scheduler` 和 `BlockManager`，模型那一步用假 token 代替，在 `schedule()` 之后和 `postprocess()` 之后各打印一次状态。两个版本的输出：
+
+| | 旧版 `f64d821~1` | 新版 `bb823b3` |
+|---|---|---|
+| `schedule` 后 A 的 `block_table` | `[0, 1, 2]` | `[0, 1, 2]` |
+| `schedule` 后 B 的 `block_table` | `[0, 1, 3]` | `[3, 4, 5]` |
+| B 的 `num_cached_tokens` / `num_scheduled_tokens` | 512 / 88 | 0 / 600 |
+| `ref_count` | `{0: 2, 1: 2, 2: 1, 3: 1}` | 全是 1 |
+| 这一步 `free blocks` | 4/8 | 2/8 |
+| `schedule` 后 `hash_to_block_id` | `{h0: 0, h1: 1}` | `{}` |
+| `postprocess` 后 `hash_to_block_id` | `{h0: 0, h1: 1}`（没变） | `{h0: 3, h1: 4}`（B 覆盖了 A） |
+| `postprocess` 后 `num_cached_tokens` | 601 | 600 |
+
+和 5.2 推的完全一致。另外两个细节：
+- A 的 block 2 和 B 的 block 3（新版是 5）装的是同样 88 个 token，但没装满，两个版本都不共享
+- `postprocess` 后旧版 601、新版 600：旧版在 `append_token` 之后 `num_cached_tokens += 1`，把刚采样出来、K/V 还没写进 cache 的第 601 个 token 也算了进去；新版只加这一步真正算过的 600 个。哪个说的是实话，留在第 8 部分
+
+### 5.4 #208 会不会算错？（推理，还没用实验验证）
+
+关键在于：B 不重算前 512 个 token，它们的 K/V 完全靠读 block 0、1。**B 读的时候，A 写进去了吗？**
+
+这一步的 batch 是 A 的 600 个 + B 的 88 个，共 688 行，同一次 forward。按 4.3，每一层：
+
+```
+第 L 层
+  ① 688 个 token 一起算出 q、k、v
+  ② store_kvcache（一次 kernel，688 个全写）
+       A 的 600 个 → block 0、1、2      ← 这一刻 block 0、1 才有了第 L 层的 K/V
+       B 的 88 个  → block 3
+  ③ attention（一次 kernel，A、B 一起）
+       A 的 600 个 query 读 block 0、1、2
+       B 的 88 个 query 读 block 0、1（A 在 ② 刚写的）+ block 3
+```
+
+② 和 ③ 是同一个 GPU stream 上的两个 kernel，② 全部写完 ③ 才开始。所以 B 在第 L 层读 block 0、1 时，A 第 L 层的 K/V 已经在里面了，28 层都是这样。#208 说“那时 0、1 里什么都还没有”，只在 schedule 那一刻成立。
+
+这个“没问题”依赖两个没写出来的条件：
+
+| 条件 | 在 nano-vllm 里由什么保证 |
+|---|---|
+| 1. A 必须在 B 读的**同一次 forward 里**把那些 block 算出来 | 只有这一步的第一条序列能分段，而且分段的那条会把这一步的预算用完，后面没有别人。所以不会出现“B 命中了 A 下一步才算的 block”（fishAndShrimp 的第一条反驳） |
+| 2. 每一层里，整个 batch 的 K/V **先全部写完**，attention 才开始读 | `store_kvcache` 和 attention 是两个分开的 kernel，先后执行（fishAndShrimp 4 月 23 日长评论的论证） |
+
+少一个都会出事：比如允许 B 命中 A 下一步才会算的 block，B 读到的就是空的或旧的数据，而且不报错。所以在 nano-vllm 里，#208 更像是“依赖两个隐含条件”，而不是现在就会算错的 bug。和 #190 对比：#190 是一个上限被默认、却没人执行；这次的两个条件，代码里恰好都满足。
+
+### 5.5 #219 的代价，和 PR #243
+
+新版的代价：
+1. **重复存储、重复计算**：同样的内容存了两份，B 多算了 512 个 token
+2. **以后可能查不到**：字典只指向 B 的那份。B 先结束、3、4 被重新分给别人后，字典里这两条被删掉（3.3 的最后一行）；可 A 的 0、1 还在用、内容一样，却查不到了
+
+最常见的触发场景：离线批量推理 `llm.generate([p1, …, p100])`，100 个 prompt 开头是同一段很长的 system prompt。它们一起进来，第一步能放多少就 prefill 多少，在新版里第一步的这些请求谁也不和谁共享。跨步的共享不受影响：step 1 登记过的 block，step 2 进来的序列照样能命中。
+
+**PR #243 的修法（late merge）**：在 `postprocess` 登记时，如果发现字典里已经有 `h0 → 0`，而且 block 0 还在用、token 也一样，就把 B 的第 0 块从 3 换成 0（`ref_count + 1`），释放 3；第 1 块同理。修好的是第 2 个代价和存储，计算已经花掉了。
+
+---
+
+## 6. 调度器的设计取舍
+
+nano-vllm 为了代码简单，做了几个选择；生产级引擎在这些地方选得不一样。第 1 部分那次运行里看到的三件事，就是这几个选择的后果。
+
+### 6.1 continuous batching：512 不是固定的 batch size
+
+`max_num_seqs = 512` 是**每一步的上限**，也是录 CUDA graph 的最大 batch。nano-vllm 用的是 continuous batching：每一步都重新组 batch，结束的序列立刻离开，新的序列在下一个 prefill 步补进来。
+
+| | 静态 batch | continuous batching（nano-vllm） |
+|---|---|---|
+| 什么时候组 batch | 一批开始时组一次 | 每一步都重新组 |
+| 有序列先结束 | 空位一直空着，等最慢的那条 | 下一步就接新的进来 |
+
+**什么时候接新的？** 没有固定时刻，每一步都检查：空闲 block 够队头那条的 prompt 用（扣掉 prefix cache 命中的），而且这一步的 token 预算还没用完。序列在 `postprocess` 里结束、释放 block，所以结束后的下一步就会尝试（第 1 部分 step 50–51）。
+
+在我的笔记本上，真正卡住数量的是 KV cache 的容量，不是 512：600-token 的 prompt 最多同时跑 60 多条。另外 nano-vllm 进来时并不限制 running 的总数，512 只限制每一步：running 超过 512 条时，每步只 decode 前 512 条（[L58](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L58)）。
+
+batch 变小只发生在离线任务的尾巴上：快做完时 running 只剩几条。batch 小时，一步 decode 的时间主要花在读一遍模型权重上，12 条和 50 条差不多，每个 token 摊到的成本更高。真实 serving 里请求一直在进来，batch 一直是满的。
+
+### 6.2 进来时要不要为生成的 token 预留 block
+
+nano-vllm 进来时只给 prompt 分 block。decode 时某个序列要新 block 却没有空的，**一般不会报错，而是抢占**（[scheduler.py L58-L65](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L58-L65)）：把 running 队尾（最晚进来）的序列踢掉，释放它的全部 block，插回 waiting 队头，等有空间时重新 prefill。被踢的序列重新进来时，原来的 block 如果还没被别人占，就能命中自己算过的部分（3.3）。只有所有人都踢光、这一个序列自己还是装不下时才会出错，这就是 [#274](issues/274-kv-cache-exhausted-assert.md)（我的 PR #280 把它改成正常结束，返回 `kv_cache_full`）。
+
+这是“显存利用率”和“重算风险”之间的取舍：
+
+| 策略 | 进来时预留 | 不够了怎么办 | 代价 | 谁这么做 |
+|---|---|---|---|---|
+| 不预留 | 只给 prompt | 抢占，被踢的重算 | 显存用得满，偶尔重算 | nano-vllm、vLLM |
+| 全部预留 | prompt + `max_tokens` | 不会不够，不需要抢占 | `max_tokens` 只是上限，多数请求早早 EOS，预留的大多浪费，同时跑的序列变少 | mini-sglang（[prefill.py L47-L50](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L47-L50)：`estimated_len = extend_len + req.output_len`，再加上正在 decode 的请求还可能生成的量，[L130-L136](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L130-L136)） |
+| 按估计预留 | prompt + 预计会生成的一部分 | 还不够就撤回一些 decode 请求 | 折中，靠估计 | SGLang（按我的了解，没对照代码） |
+
+### 6.3 prefill 和 decode 要不要放在同一步
+
+nano-vllm 一步只做一种，而且 prefill 优先。代价在第 1 部分 step 51：为了接 1 条新序列，52 条正在生成的都停了一步，prompt 越长停得越久。serving 里关心两个指标：
+- **TTFT**（time to first token，第一个 token 多久出来）：prefill 优先，对它有利
+- **TPOT / ITL**（之后每个 token 间隔多久）：被 prefill 打断，对它不利
+
+生产级引擎的做法是 **chunked prefill + 混合 batch**：每一步先放 decode 的 token，剩下的 token 预算再塞一段 prefill（长 prompt 切成几段，分几步算），decode 就不会被整段 prefill 卡住。更进一步是 **PD 分离**：prefill 和 decode 放在不同的 GPU 上。
+
+**混合 batch 里，decode 只算 1 个 token，和 prefill 段不冲突吗？** 不冲突，用的就是 4.4 的机制：矩阵乘那些层里每个 token 只是一行；attention 里每个序列只看自己的 key，靠 `cu_seqlens_q` / `cu_seqlens_k` 告诉 kernel 每个序列有几个 query、几个 key（[model_runner.py L140-L146](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L140-L146)）。例如一个 decode 序列 D（已有 700 个 token）和一个 prefill 第 2 段 P（prompt 2048，第 1 段算了前 1024）放在同一步：
+
+| 序列 | query | key | key 从哪里来 |
+|---|---|---|---|
+| D | 1 个（第 701 个） | 701 个 | 前 700 个以前写进它的 block；第 701 个这一层刚写 |
+| P | 1024 个（第 1024–2047） | 2048 个 | 前 1024 个上一步写进 cache；后 1024 个这一层刚写 |
+
+一次 attention 调用：`cu_seqlens_q = [0, 1, 1025]`，`cu_seqlens_k = [0, 701, 2749]`。
+
+**那 nano-vllm 为什么不混？**
+1. prefill 和 decode 用两个不同的 attention 调用（`flash_attn_varlen_func` 和 `flash_attn_with_kvcache`），要混就得统一成一个
+2. decode 靠录好的固定形状的 CUDA graph（见 [QA-cuda-graph](QA-cuda-graph.md)），混合 batch 每步形状都不一样，录不了。vLLM 的办法大致是分段录：attention 以外的部分录成 graph，attention 每步正常调用
+
+### 6.4 四个引擎放在一起
+
+mini-sglang 在“混不混”这一点上和 nano-vllm 一样，prefill 优先、一步只做一种，作者在代码里留了 TODO（[scheduler.py L219-L224](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/scheduler.py#L219-L224)）：
+
+```python
+def _schedule_next_batch(self) -> ForwardInput | None:
+    # TODO: support other policies: e.g. DECODE first
+    batch = (
+        self.prefill_manager.schedule_next_batch(self.prefill_budget)
+        or self.decode_manager.schedule_next_batch()
+    )
+```
+
+| | nano-vllm | mini-sglang | SGLang | vLLM V1 |
+|---|---|---|---|---|
+| 一步里混 prefill 和 decode | 不混 | 不混（有 TODO） | 默认不混；`--enable-mixed-chunk` 可以把 decode 混进分段 prefill 的那一步 | 默认就混：每步先放 decode，剩下的预算塞 prefill 段 |
+| chunked prefill | 只有这一步的第一条能分段 | 预算（`max_extend_tokens=8192`）用完时，最后放进来的那条可以分段（[prefill.py L72-L77](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L72-L77)） | 有，每段大小可配置 | 默认开启 |
+| 进来时预留 | 只给 prompt，不够就抢占 | prompt + `output_len`，不抢占 | 按估计比例预留，不够就撤回 | 只给需要的，不够就抢占 |
+| PD 分离 | 无 | 无 | 支持 | 支持 |
+| prefix cache | hash + 字典，按 block 共享 | radix tree，按 token 共享 | radix tree | hash，按 block 共享 |
+
+SGLang 和 vLLM 两列是按我对它们的了解写的，还没对照代码。mini-sglang 另外有 overlap scheduling（GPU 算这一步时 CPU 准备下一步），见 [mini-sglang 的 QA-overlap](../mini-sglang/QA-overlap.md)；它的 radix tree 见 [QA-kv-cache](../mini-sglang/QA-kv-cache.md)。
+
+---
+
+## 7. 我的理解和纠正
+
+✅ 对 / ⚠️ 部分对 / ❌ 错。
+
+### 7.1 我先用自己的话写了一遍 1000 条 prompt 进来以后发生什么
+
+| 我的理解 | 实际 |
+|---|---|
+| ✅ 按进来的顺序排队 | `generate` 把所有请求放进 waiting，先进先出；被抢占的序列插回**队头** |
+| ⚠️ 选最前面几个“能把 seq len 填满”的 | 标准是 token 预算、每步 512 个、队头要的 block 够不够，三者先到为止；不会跳过队头（第 1 部分的表） |
+| ✅ 同一批里前缀相同也指不到同一个 block，旧版可以 | 对，这就是 #219，只出现在同一步里 |
+| ⚠️ 前缀相同的 KV block 是不是直接覆盖？ | **K/V 数据不覆盖**：GPU 只往每个序列自己的 block 里写，结果是存两份。**覆盖的只是字典里的一条**：B 登记时盖掉 A 的，A 照样用自己的 block 算到结束 |
+| ✅ 剩下的继续 prefill，直到 block 不够 | 对。补充：接进了至少一个序列，这一步就只做 prefill |
+| ✅ 后面的可以用前面算过的 KV | 对，跨步共享正常；前面的序列已经结束也可以，只要 block 还没被重新分配（3.3） |
+| ⚠️ 所有 seq 放进去、block 还有多的，就开始 decode | 条件是这一步一个新序列都接不进来；有序列结束、释放 block 后，下一步又会先 prefill |
+| ⚠️ EOS 了 block 就被逐出去？被别人共用怎么办？ | 靠 `ref_count`：只减自己那份，到 0 才放回空闲列表，内容和登记暂时都还在（3.3） |
+| ❌ 超过 block size 就生成新 block，之前的 block 整合到 kv cache 中 | **不会整合**。KV cache 启动时就一次性分配好，block 只是其中 256 行，不移动、不合并；`block_table` 按顺序记下一个序列的 block，attention 按表读（4.3） |
+
+### 7.2 其他几处
+
+- ❌ **复现前的预测**：`block_table` 两个版本都预测对了，但 `num_cached_tokens / num_scheduled_tokens` 把两个版本写反了（旧版写成 0/600，新版写成 512/88）。判断方法：**block 共享了，cached token 就跟着变**。旧版 B 用了 A 的 0、1，前 512 个就不用自己算
+- ⚠️ **“新版让新序列看不到以前的结果，只能重算”**：只对了一半。看不到的只是**同一步**里别人的结果，以前的步登记过的照样能命中（5.5）
+- ⚠️ **“A、B 在同一个 prefill 里，prefill 反正都要重新算，所以 #208 没问题”**：结论方向对，理由错了。B 并没有重算前 512 个 token（`num_scheduled_tokens=88`），真正的理由是每一层先写后读（5.4）
+
+---
+
+## 8. 还没回答的问题
+
+1. **用实验验证 5.4 的推理**（#219 的第 3 步）：旧版上比较“同一步命中”（一次 `generate([P, P])`）和“正常命中”（先后两次 `generate([P])`）时 B 的输出。按推理应该一样
+2. **既然旧版没算错，#218 把登记挪到 `postprocess` 图的是什么？** 提示：#218 的标题是 “fix chunked prefill bugs”。如果以后允许多条序列同时分段，5.4 的条件 1 还成立吗？
+3. **旧版 601、新版 600，哪个说的是实话？** 第 601 个 token 的 K/V 现在在 cache 里吗？什么时候才写进去？
+4. **#219 要不要修？** 想想 5.5 的离线批量场景，重复算的 512 个 token 和多占的 block 各值多少
+5. **PR #243 修得对不对？** 合并前检查了哪些条件？有没有漏掉的情况？
+6. **#219 的“查不到”能不能复现出来？** 让 B 先结束并释放，再用别的请求占掉 B 的 block，最后来一个前缀相同的请求，看它能不能命中 A 还在用的 block

@@ -103,6 +103,7 @@ The questions I asked while studying each topic, with answers, diagrams and self
 | Topic | Page | Covers |
 |---|---|---|
 | CUDA graph | [QA-cuda-graph.md](QA-cuda-graph.md) | Graph buffers, how a decode batch runs, CUDA graph and why one per batch size, what a recorded graph contains, GPU kernels from a naive matmul to FlashAttention, how buffers, graph nodes and kernels connect, a self-quiz. Then the reproduction, the open PRs tested side by side, #270's exact limit, and the requests it leaves behind. Started from [#190](issues/190-cuda-graph-block-tables.md) |
+| Scheduling and prefix cache | [QA-scheduling.md](QA-scheduling.md) | A flowchart of what the scheduler does each step, with one concrete run. How prefix caching shares blocks (hashes, the dictionary, `ref_count`, the life of a block), and how a prefill computes only the uncached tokens while still reading the rest from the cache. #208 and #219 as one case: when a block is registered, the scheduler simulation on the old and new code, and why #208 should not give wrong results here. Then design choices: continuous batching, reserving versus preempting, whether prefill and decode share a step, compared with mini-sglang, SGLang and vLLM. My understanding and corrections. Started from #219 and #208, still in progress |
 
 ## Resources
 
