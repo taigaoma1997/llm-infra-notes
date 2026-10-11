@@ -148,7 +148,7 @@ A 2×2 run on the current code separates the two factors. A's prompt stays the s
 
 | A's prefill step | attention without block table | attention with block table |
 |---|---|---|
-| 688 tokens | differs from token 22 | differs from token 13, and matches the old code's A |
+| 688 tokens | differs from token 22 | differs from token 13; all 32 tokens match the old code's A |
 | 1,200 tokens | baseline (`[P, P]`) | differs from token 22 |
 
 Both factors matter. A different attention path calls a different kernel. A different number of tokens changes the matrix shapes, and cuBLAS and `torch.compile` pick kernels by shape, much as decode at batch size 1 uses `gemv` and at 16 uses `cutlass` ([#190](190-cuda-graph-block-tables.md#inside-a-recorded-graph)). A different kernel accumulates in a different order, and the last bits of bf16 results change. Wherever two candidate tokens are nearly tied, that is enough to flip the choice, and everything after it differs.
@@ -166,7 +166,7 @@ It matters most for offline batches: `generate()` with 100 prompts that share a 
 
 ## Thoughts
 
-1. **When a fact is published matters as much as what it says.** The whole difference between the two versions is one line moved from allocation to `postprocess`. Publishing early saves work for same-step requests but hands out blocks that do not exist yet; publishing late is safe but slower.
+1. **When a fact is published matters as much as what it says.** What separates the two versions here is only where the registration happens: at allocation, or in `postprocess`. Publishing early saves work for same-step requests but hands out blocks before their K/V is computed; publishing late is safe but repeats the work.
 2. **A correctness argument that rests on scheduler rules should be written next to the code that relies on it.** Nothing in `BlockManager` says that early registration is only safe because a split sequence takes the whole step. This is the same kind of thing as [#190](190-cuda-graph-block-tables.md), seen from the other side: there an assumed limit was never enforced; here the assumed conditions happen to hold.
 3. **Keep bookkeeping and data apart.** "B sees A's blocks" happens on the CPU, in the dictionary and block tables, before anything is computed. Whether the data is there when it is read is a separate question about kernel order on the GPU.
 4. **To compare two runs, change one thing.** Different kernels and shapes move bf16 rounding enough to flip a near-tie, so outputs that drift apart are not proof of a bug. A and B could be compared token by token because they ran in the same batch, through the same kernels.

@@ -74,9 +74,9 @@ flowchart LR
 
 | # | Question | Status |
 |---|---|---|
-| 01 | What happens to a request between `generate()` and the returned text? | planned |
-| 02 | How does the scheduler choose prefill or decode, and when does it preempt? | planned |
-| 03 | How are KV cache blocks allocated, shared by prefix hash, and freed? | planned |
+| 01 | What happens to a request between `generate()` and the returned text? | planned; the scheduling side is in [QA-scheduling](QA-scheduling.md) (in Chinese), parts 1 and 7.1 |
+| 02 | How does the scheduler choose prefill or decode, and when does it preempt? | planned; much of it is already in [QA-scheduling](QA-scheduling.md), parts 1 and 6 |
+| 03 | How are KV cache blocks allocated, shared by prefix hash, and freed? | planned; much of it is already in the [#219 write-up](issues/219-same-step-prefix-sharing.md#background-how-nano-vllm-shares-cached-blocks) and [QA-scheduling](QA-scheduling.md), parts 3 and 4 |
 | 04 | What does ModelRunner prepare for each step, and where is CUDA Graph used? | planned; much of it is already in the [#190 write-up](issues/190-cuda-graph-block-tables.md#background-how-one-decode-step-runs) |
 | 05 | How does tensor parallelism split the model and keep workers in sync? | planned |
 
@@ -86,7 +86,7 @@ Write-ups live in [issues/](issues/). The status of each one is tracked in [CONT
 
 ## A pattern across these issues
 
-Each bug I have reproduced so far comes from a limit the code assumes but never enforces. nano-vllm is meant to be small and readable, so it leaves out most input checks that a production engine like vLLM has.
+Three of the bugs I have reproduced come from a limit the code assumes but never enforces. nano-vllm is meant to be small and readable, so it leaves out most input checks that a production engine like vLLM has.
 
 | Issue | Assumed limit | What should have checked it |
 |---|---|---|
