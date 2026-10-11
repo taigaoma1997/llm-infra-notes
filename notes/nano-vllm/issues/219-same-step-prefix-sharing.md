@@ -18,7 +18,7 @@
 
 ## What I learned
 
-- How scheduling works, and it can function differently when initialize at differnet time steps. 
+- How scheduling and prefix cache works in detail, and it can function differently when initialize at differnet time steps. 
 - Realized that the kv cache has steps: first computed, then written, this leads to the flexibility that we can add half pre-computed attention calculation.
 - The id dictionary will get rewritten by the last time, that's how the A get losts. 
 - very small T v.s. argmax: they are different. Even if the temperature small, the bf16's logits accuracy will remove such difference. Also, the random selection when logits are the same also brings different results. 
