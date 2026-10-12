@@ -2,13 +2,14 @@
 
 读 nano-vllm [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) 和 [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) 时，我问过的问题和答案。这两个 issue 讲的是 prefix cache 里一个很小的细节，可要看懂它，得先弄清调度器每一步在做什么、block 怎么被共享、命中以后怎么算。问着问着就延伸到了调度器的整体设计：continuous batching、预留和抢占、prefill 和 decode 要不要放在同一步。
 
-用中文写，方便自己复习；英文的整理版见 [#219 write-up](issues/219-same-step-prefix-sharing.md)。代码都对应 upstream [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)；“旧版”指 #218 合并之前的 `f64d821~1`（[`44a51af`](https://github.com/GeeeekExplorer/nano-vllm/tree/44a51afc8a7f60e75ce3f4ee94632430eff9de65)）。2026-10-10 整理。
+用中文写，方便自己复习；英文的整理版见 [#219 write-up](issues/219-same-step-prefix-sharing.md)。代码都对应 upstream [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)；“旧版”指 #218 合并之前的 `f64d821~1`（[`44a51af`](https://github.com/GeeeekExplorer/nano-vllm/tree/44a51afc8a7f60e75ce3f4ee94632430eff9de65)）。2026-10-10 整理，10-11 补了 PR #243 的测试。
 
 **结论先说**
 
 - **共享只发生在序列进来的那一刻**（prefill 查字典），能共享的只有装满的 block，而且只能共享“已经登记”的 block（3.2）
 - **#208 和 #219 争的是“什么时候登记”**：旧版分配 block 时就登记，同一步后进来的序列能用上前面的 block；新版算完才登记，同一步里的相同前缀各占一份（#219），字典还会被后登记的覆盖（5.2）
 - **#208 在 nano-vllm 里不会算错**：一次 forward 里每一层都是先写 K/V、再做 attention，B 读的时候 A 已经写好了。真实引擎上，旧版 A、B、C 的输出完全一样（5.4）
+- **#219 已经有人修了**：PR #243 在登记时发现重复，就把后来的那份合并到已有的 block 上。实测显存收回来了、字典不再被覆盖、输出不变；那一步多算的 token 省不回来（5.5）
 - **两次运行的输出差几个 token，不一定是 bug**：换了 attention 路径或者 batch 的 token 数，用的 kernel 就不同，bf16 的最后几位跟着变，几乎打平的 token 会被翻过来（7.3 第 9 条）
 
 **目录**（先看第 1 部分建立全局，再按顺序往下）
@@ -499,7 +500,7 @@ dict->|         |         |         |   h0    |   h1    |         |         |
 | B 在这一步能用上 A 的 block 吗 | 能 | 不能 | 算完以后才合并 |
 | B 要算几个 token | 88 | 600 | 600 |
 | 这一步结束后占几个 block | 4 | 6 | 4 |
-| 风险 | #208：命中了还没算的 block | #219：重复存储，以后还可能查不到 | 存储省回来了，多算的 512 个 token 省不回来（没有细看它的边界情况） |
+| 风险 | #208：命中了还没算的 block | #219：重复存储，以后还可能查不到 | 存储省回来了，多算的 512 个 token 省不回来（实测见 5.5） |
 
 ### 5.3 复现：调度器模拟
 
@@ -599,7 +600,21 @@ layer 27  |  empty   |  empty   |  empty   |  empty   |
 
 最常见的触发场景：离线批量推理 `llm.generate([p1, …, p100])`，100 个 prompt 开头是同一段很长的 system prompt。它们一起进来，第一步能放多少就 prefill 多少，在新版里第一步的这些请求谁也不和谁共享。跨步的共享不受影响：step 1 登记过的 block，step 2 进来的序列照样能命中。
 
-**PR #243 的修法（late merge）**：在 `postprocess` 登记时，如果发现字典里已经有 `h0 → 0`，而且 block 0 还在用、token 也一样，就把 B 的第 0 块从 3 换成 0（`ref_count + 1`），释放 3；第 1 块同理。修好的是第 2 个代价和存储，计算已经花掉了。
+**PR #243 的修法（late merge）**：在 `postprocess` 登记时，如果发现字典里已经有 `h0 → 0`，而且 block 0 还在用、token 也一样，就把 B 的第 0 块从 3 换成 0（`ref_count + 1`），释放 3；第 1 块同理（[改动](https://github.com/GeeeekExplorer/nano-vllm/pull/243/files)，只有 15 行）。
+
+我在 PR 的代码（`1704c07`，基于 `bb823b3`）上跑了同样的两个脚本。调度器模拟，还是 8 个 block 的例子：
+
+| | 新版 `bb823b3` | PR #243 |
+|---|---|---|
+| `schedule` 后 B 的 `block_table` | `[3, 4, 5]` | `[3, 4, 5]`（分配时还是各要各的） |
+| `postprocess` 后 B 的 `block_table` | `[3, 4, 5]` | `[0, 1, 5]`（前两块改指到 A 的） |
+| block 0、1 的 `ref_count` | 1 | 2（A、B 共用） |
+| `postprocess` 后空闲 block | 2/8 | 4/8（B 重复的 3、4 被释放） |
+| `postprocess` 后 `hash_to_block_id` | `{h0: 3, h1: 4}` | `{h0: 0, h1: 1}`（不再被覆盖） |
+
+真实引擎上：A 和 B 的 32 个 token 完全一样，B 合并后改读 A 的 block，输出没变；之后的 C 命中的是 A、B 共用的 block（`[0, 1, 6]`）。A 和 C 还是从第 22 个 token 开始不同，和新版一样，是 7.3 第 9 条说的 bf16 舍入，和 PR 无关。
+
+所以 PR #243 修好了第 2 个代价和多占的显存；那一步 B 已经把 600 个 token 都算了（分配时还看不到 A），这部分计算省不回来。它的边界情况我没有细看。
 
 ---
 

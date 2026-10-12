@@ -1,9 +1,9 @@
 # [nano-vllm #219] Identical prefixes prefilled in the same step get separate blocks, and #208
 
 - Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/219 · The other side of the same change: [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) (closed by its reporter) · The change: [#218](https://github.com/GeeeekExplorer/nano-vllm/pull/218) (merged) · Open PR: [#243](https://github.com/GeeeekExplorer/nano-vllm/pull/243)
-- Status: studied. Reproduced both sides with a scheduler simulation and on the real engine. #208 does not give wrong results in nano-vllm; #219 is a real cost. No PR from me, and I did not review #243 in depth.
-- Commit tested: `bb823b3` (current upstream), and `f64d821~1` (`44a51af`, the code before #218)
-- Written: 2026-10-10
+- Status: studied. Reproduced both sides with a scheduler simulation and on the real engine. #208 does not give wrong results in nano-vllm; #219 is a real cost. No PR from me: the open PR #243 already removes the duplicate blocks, and in my tests the outputs stay the same.
+- Commit tested: `bb823b3` (current upstream), `f64d821~1` (`44a51af`, the code before #218), and PR #243 (`1704c07`, based on `bb823b3`)
+- Written: 2026-10-10 · Updated: 2026-10-11
 - Study Q&A (Chinese), with every question I asked along the way: [QA-scheduling.md](../QA-scheduling.md)
 
 <!-- Also add a row to CONTRIBUTIONS.md and to the Contributions table in README.md, and keep its status in sync with this page. -->
@@ -15,6 +15,7 @@
 - **#219 (current code):** two identical prompts prefilled in the same step no longer share. Each computes and stores its own copy, and the second registration overwrites the first, so the first copy can no longer be found.
 - **#208 does not give wrong results here.** Within each layer, the whole batch's K/V is written before attention reads it, so the reused blocks are filled by the time they are read. On the real engine, the request that reused same-step blocks generated exactly the same tokens as the request that computed them. This relies on two conditions the code never states ([below](#does-208-give-wrong-results)).
 - **Side finding:** two runs of the same prompt can drift apart after a few tokens, and that is not a bug. Changing the attention path or the number of tokens in the step changes which kernels run, which changes bf16 rounding enough to flip a near-tied token ([below](#side-finding-why-two-correct-runs-drift-apart)).
+- **The open fix works for memory, not for compute.** [PR #243](https://github.com/GeeeekExplorer/nano-vllm/pull/243) merges B's duplicate blocks into A's after the step. In my tests, B ends up on A's blocks, the copies are freed, the dictionary is no longer overwritten, and the outputs do not change. The tokens B computed twice in that step are not saved ([below](#the-cost-of-219-and-pr-243)).
 
 ## What I learned
 
@@ -162,7 +163,21 @@ Greedy decoding needs a true argmax here, not just a tiny temperature. nano-vllm
 
 It matters most for offline batches: `generate()` with 100 prompts that share a long system prompt admits as many as fit in the first step, and none of those share.
 
-[PR #243](https://github.com/GeeeekExplorer/nano-vllm/pull/243) merges after the fact: when B registers a hash that already points to a live block with the same tokens, it switches B to that block and frees B's copy. That recovers the memory and the lost reuse, not the computation. I did not test it.
+[PR #243](https://github.com/GeeeekExplorer/nano-vllm/pull/243) merges after the fact: when B registers a hash that already points to a live block with the same tokens, it switches B to that block and frees B's copy ([15 lines](https://github.com/GeeeekExplorer/nano-vllm/pull/243/files)).
+
+I ran the same two scripts on the PR's head (`1704c07`, based on `bb823b3`). The scheduler simulation, same 8-block example:
+
+| | current `bb823b3` | PR #243 |
+|---|---|---|
+| B's block table after scheduling | `[3, 4, 5]` | `[3, 4, 5]` |
+| B's block table after `postprocess` | `[3, 4, 5]` | `[0, 1, 5]` |
+| `ref_count` of blocks 0 and 1 | 1 | 2 |
+| free blocks after `postprocess` | 2 of 8 | 4 of 8 |
+| dictionary after `postprocess` | `{h0: 3, h1: 4}` | `{h0: 0, h1: 1}` |
+
+On the real engine, A and B generate the same 32 tokens, so switching B to A's blocks after the step leaves B's output unchanged, and the later request C reuses the shared blocks (`[0, 1, 6]`). A and C still drift apart from token 22, exactly as on the current code: that is the bf16 effect above, not the PR.
+
+So PR #243 recovers the memory and the lost reuse. It cannot recover the computation: nothing is shared at scheduling time, so B has already computed all 600 tokens by the time the blocks are merged. I did not review its edge cases.
 
 ## Thoughts
 
