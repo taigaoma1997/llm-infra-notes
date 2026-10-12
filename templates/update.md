@@ -1,7 +1,5 @@
 # Week of {{DATE}}
 
-Time spent: about __ h
-
 <!-- Public work only. Do not mention internal company code, systems, documents or numbers. -->
 
 ## Done
