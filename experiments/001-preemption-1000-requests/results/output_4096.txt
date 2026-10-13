@@ -1,0 +1,11 @@
+1000 requests x 500 tokens, max_tokens 300, 4096 blocks; total steps 630
+free = free blocks after schedule(); running and waiting = after postprocess()
+steps        kind     seqs/step  tokens/step  preempt  finish  recompute  free  running  waiting  seq len (decode)
+1-31         prefill         32        16000        0       0          0  2112      992        8  
+32           prefill          8         4000        0       0          0  2096     1000        0  
+33-330       decode         512          512        0       0          0  1072     1000        0  501..798
+331          decode         512          512        0     512          0  1072      488        0  799..799
+332-629      decode         488          488        0       0          0  2144      488        0  501..798
+630          decode         488          488        0     488          0  2144        0        0  799..799
+(tokens/step is the first step of a merged line)
+summary: 630 steps (32 prefill, 598 decode), 0 preemptions, 500000 prefill tokens (prompts alone: 500000), at most 1000 sequences in running

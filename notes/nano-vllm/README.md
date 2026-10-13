@@ -74,11 +74,11 @@ flowchart LR
 
 | # | Question | Status |
 |---|---|---|
-| 01 | What happens to a request between `generate()` and the returned text? | planned; the scheduling side is in [QA-scheduling](QA-scheduling.md) (in Chinese), parts 1 and 7.1 |
-| 02 | How does the scheduler choose prefill or decode, and when does it preempt? | planned; much of it is already in [QA-scheduling](QA-scheduling.md), parts 1 and 6 |
-| 03 | How are KV cache blocks allocated, shared by prefix hash, and freed? | planned; much of it is already in the [#219 write-up](issues/219-same-step-prefix-sharing.md#background-how-nano-vllm-shares-cached-blocks) and [QA-scheduling](QA-scheduling.md), parts 3 and 4 |
-| 04 | What does ModelRunner prepare for each step, and where is CUDA Graph used? | planned; much of it is already in the [#190 write-up](issues/190-cuda-graph-block-tables.md#background-how-one-decode-step-runs) |
-| 05 | How does tensor parallelism split the model and keep workers in sync? | planned |
+| 01 | [What happens to a request between `generate()` and the returned text?](01-request-lifecycle.md) | draft |
+| 02 | [How does the scheduler choose prefill or decode, and when does it preempt?](02-scheduler.md) | draft |
+| 03 | [How are KV cache blocks allocated, shared by prefix hash, and freed?](03-block-manager-and-prefix-cache.md) | draft |
+| 04 | [What does ModelRunner prepare for each step, and where is CUDA Graph used?](04-model-runner-and-cuda-graph.md) | draft |
+| 05 | How does tensor parallelism split the model and keep workers in sync? | planned; the basics, from nano-vllm's code, are in [fundamentals: parallelism](../fundamentals/04-parallelism.md) |
 
 ## Issues I reproduced
 
@@ -106,6 +106,7 @@ The questions I asked while studying each topic, with answers, diagrams and self
 |---|---|---|
 | CUDA graph | [QA-cuda-graph.md](QA-cuda-graph.md) | Graph buffers, how a decode batch runs, CUDA graph and why one per batch size, what a recorded graph contains, GPU kernels from a naive matmul to FlashAttention, how buffers, graph nodes and kernels connect, a self-quiz. Then the reproduction, the open PRs tested side by side, #270's exact limit, and the requests it leaves behind. Started from [#190](issues/190-cuda-graph-block-tables.md) |
 | Scheduling and prefix cache | [QA-scheduling.md](QA-scheduling.md) | A flowchart of what the scheduler does each step, with one concrete run. How prefix caching shares blocks (hashes, the dictionary, `ref_count`, the life of a block), and how a prefill computes only the uncached tokens while still reading the rest from the cache. #208 and #219 as one case: when a block is registered, drawn block by block for the old and new code, the scheduler simulation, why #208 should not give wrong results here, and a real-engine run that confirms it. Then design choices: continuous batching, reserving versus preempting, whether prefill and decode share a step, compared with mini-sglang, SGLang and vLLM. My understanding and corrections. Started from [#219](issues/219-same-step-prefix-sharing.md) and #208 |
+| Compared with mini-sglang | [QA-vs-mini-sglang.md](QA-vs-mini-sglang.md) | One example (1000 requests of 500 + 300 tokens) walked through both engines: the step loop they share, then the four big differences: 256-token blocks with hashed prefixes against one-token slots with a radix tree, preempting against reserving `max_tokens` at admission, waiting for each step against overlap scheduling, one program against a server with three kinds of processes. Then smaller ones: how the KV cache is sized, which batch sizes get a CUDA graph and how a batch is padded, and how each engine runs on several GPUs. The same page is in the [mini-sglang notes](../mini-sglang/QA-vs-nano-vllm.md). A self-quiz, not answered yet |
 
 ## Resources
 

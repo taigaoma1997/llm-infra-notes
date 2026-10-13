@@ -89,7 +89,7 @@ The same approach as for [nano-vllm](../nano-vllm/README.md#how-i-reproduce-and-
 
 | # | Question | Status |
 |---|---|---|
-| 01 | What does mini-sglang add on top of nano-vllm, and why? | planned |
+| 01 | What does mini-sglang add on top of nano-vllm, and why? | planned; much of it is already in [QA-vs-nano-vllm](QA-vs-nano-vllm.md) (in Chinese) |
 | 02 | How does the radix cache find and reuse a shared prefix? | planned |
 | 03 | How does overlap scheduling hide CPU work behind GPU work? | planned |
 
@@ -106,6 +106,7 @@ The questions I asked while studying each topic, with answers, diagrams and self
 | Processes | [QA-processes.md](QA-processes.md) | The three ways to run it, which processes a server starts and what each one does, the startup log line by line, how one request travels between processes, why tokenization has its own process, and why there is only one detokenizer. A self-quiz |
 | KV cache and radix tree | [QA-kv-cache.md](QA-kv-cache.md) | One KV slot per token and the page table, how the radix tree shares prefixes (a run with real tokens), the life of a cached prefix (hit, lock, insert, LRU eviction) traced in the scheduler simulation, how the KV cache is laid out in GPU memory and written by the store kernel, how a batch is read by slot index without copying, how this compares with nano-vllm's 256-token blocks and why flash-attn needs them. A self-quiz |
 | Overlap scheduling | [QA-overlap.md](QA-overlap.md) | Why overlap scheduling helps, how the next step is launched before the last one is processed and how tokens are handed over on the GPU, what it costs, why it makes the radix cache miss a prefix computed one step earlier, how that leads to the bug that PRs #142 and #154 fix, and where that bug came from, compared with SGLang's code. A self-quiz |
+| Compared with nano-vllm | [QA-vs-nano-vllm.md](QA-vs-nano-vllm.md) | One example (1000 requests of 500 + 300 tokens) walked through both engines: the step loop they share, then the four big differences: one-token slots with a radix tree against 256-token blocks with hashed prefixes, reserving `max_tokens` at admission against preempting, overlap scheduling against waiting for each step, a server with three kinds of processes against one program. Then smaller ones: how the KV cache is sized, which batch sizes get a CUDA graph and how a batch is padded, and how each engine runs on several GPUs. The same page is in the [nano-vllm notes](../nano-vllm/QA-vs-mini-sglang.md). A self-quiz, not answered yet |
 
 ## Resources
 

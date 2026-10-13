@@ -2,7 +2,12 @@
 
 ## Notes
 
-None yet.
+| # | Question | Status |
+|---|---|---|
+| 01 | [How much memory does the KV cache take, and how many requests fit?](01-kv-cache-sizing.md) | draft |
+| 02 | Why are prefill and decode so different? | planned |
+| 03 | What limits a decode step on my GPU (roofline)? | planned |
+| 04 | [How is a model split across GPUs, and where does the KV cache live?](04-parallelism.md) | draft |
 
 ## Resources
 

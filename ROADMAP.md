@@ -11,9 +11,9 @@ Budget: about 10 hours a week alongside a full-time job. Phases overlap. Dates a
 ## Phase 1 · Engine internals with nano-vllm (Sep to Oct 2026) · in progress
 
 - [x] Run nano-vllm end to end
-- [ ] Notes 01 to 04: request lifecycle, scheduler, block manager and prefix cache, model runner and CUDA Graph
+- [x] Notes 01 to 04: request lifecycle, scheduler, block manager and prefix cache, model runner and CUDA Graph
 - [x] Reproduce two or three open issues and write up each one: #274, #170, #190 and #219 done
-- [ ] Fundamentals: KV cache sizing, prefill vs decode, roofline
+- [ ] Fundamentals: KV cache sizing, prefill vs decode, roofline: KV cache sizing written, plus a note on parallelism
 
 Done when I can draw a request's path through nano-vllm from memory and explain every stage.
 
