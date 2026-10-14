@@ -647,7 +647,7 @@ nano-vllm 进来时只给 prompt 分 block。decode 时某个序列要新 block 
 |---|---|---|---|---|
 | 不预留 | 只给 prompt | 抢占，被踢的重算 | 显存用得满，偶尔重算 | nano-vllm、vLLM |
 | 全部预留 | prompt + `max_tokens` | 不会不够，不需要抢占 | `max_tokens` 只是上限，多数请求早早 EOS，预留的大多浪费，同时跑的序列变少 | mini-sglang（[prefill.py L47-L50](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L47-L50)：`estimated_len = extend_len + req.output_len`，再加上正在 decode 的请求还可能生成的量，[L130-L136](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L130-L136)） |
-| 按估计预留 | prompt + 预计会生成的一部分 | 还不够就撤回一些 decode 请求 | 折中，靠估计 | SGLang（按我的了解，没对照代码） |
+| 按估计预留 | 新请求按 prompt + `max_tokens`；正在跑的请求按预计会生成的比例打折（0.7 起，逐步降低） | 还不够就撤回（retract）一些 decode 请求 | 折中，靠估计 | SGLang（2026-10-13 对照代码核对过，见 [SGLang 的 QA-vs-mini-sglang](../sglang/QA-vs-mini-sglang.md) 第 3 部分） |
 
 ### 6.3 prefill 和 decode 要不要放在同一步
 
@@ -691,7 +691,7 @@ def _schedule_next_batch(self) -> ForwardInput | None:
 | PD 分离 | 无 | 无 | 支持 | 支持 |
 | prefix cache | hash + 字典，按 block 共享 | radix tree，按 token 共享 | radix tree | hash，按 block 共享 |
 
-SGLang 和 vLLM 两列是按我对它们的了解写的，还没对照代码。mini-sglang 另外有 overlap scheduling（GPU 算这一步时 CPU 准备下一步），见 [mini-sglang 的 QA-overlap](../mini-sglang/QA-overlap.md)；它的 radix tree 见 [QA-kv-cache](../mini-sglang/QA-kv-cache.md)。
+SGLang 一列在 2026-10-13 对照 SGLang 的代码（`e9400c5`）核对过，细节见 [SGLang 的 QA-vs-mini-sglang](../sglang/QA-vs-mini-sglang.md)；vLLM 一列还是按我的了解写的，没对照代码。mini-sglang 另外有 overlap scheduling（GPU 算这一步时 CPU 准备下一步），见 [mini-sglang 的 QA-overlap](../mini-sglang/QA-overlap.md)；它的 radix tree 见 [QA-kv-cache](../mini-sglang/QA-kv-cache.md)。
 
 ---
 

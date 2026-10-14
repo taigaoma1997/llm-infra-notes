@@ -1,6 +1,6 @@
 # mini-sglang 问答：和 nano-vllm 有什么区别
 
-读完两边的主干代码以后，我问的一个大问题：nano-vllm 和 mini-sglang 到底有什么区别？这一页用同一个例子，把两边一步一步对照着走一遍。nano-vllm 的文件夹里有同样的一份（[QA-vs-mini-sglang](../nano-vllm/QA-vs-mini-sglang.md)），两份正文一样。
+读完两边的主干代码以后，我问的一个大问题：nano-vllm 和 mini-sglang 到底有什么区别？这一页用同一个例子，把两边一步一步对照着走一遍。nano-vllm 的文件夹里有同样的一份（[QA-vs-mini-sglang](../nano-vllm/QA-vs-mini-sglang.md)），两份正文一样。SGLang 本体在这些地方怎么做，见 [SGLang 的 QA-vs-mini-sglang](../sglang/QA-vs-mini-sglang.md)。
 
 代码：mini-sglang [`9a91cfa`](https://github.com/sgl-project/mini-sglang/tree/9a91cfafe754aa85daee49998176275667eb58f2)，nano-vllm [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)。2026-10-12 整理。
 
