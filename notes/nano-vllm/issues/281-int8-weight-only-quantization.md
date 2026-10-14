@@ -21,7 +21,8 @@
 - How int impacts the decodes? -> Only when the batch is small (decode token is small) it is faster. The faster time comes from the less evicited blocks, fewer steps due to more blocks available -> Getting more memory for blocks is already a speedup! Not necessarily due to the quantization. 
 - Int8 quantization does not change the peak memory usage -> since int8 only change weights, we still need activations in bf16. 
 - o/down is not speed up in int8 -> only need 16 threads, but GPU has 24 SM, so it does not fully utilize the GPU resources -> Also reminds me that speeds up should also depends on the GPU and models! That's how infra works!
-- Need to run multiple times to remove the noise on time. 
+- Need to run multiple times to remove the noise on time.
+- Quantization can leads to errors, need a method to evaluate the error!
 
 ## Background: what the PR changes
 
