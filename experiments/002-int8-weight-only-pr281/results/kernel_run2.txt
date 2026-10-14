@@ -1,0 +1,51 @@
+# bench_kernel.py --m 2000 2017 2048 4000 4096. Run on 2026-10-14 with the first version of the script, whose labels
+# were in Chinese; the labels below are translated, the numbers are unchanged. The CSV of this run is kernel_m2000.csv.
+GPU: NVIDIA GeForce RTX 4060 Laptop GPU   torch 2.6.0+cu124   triton 3.2.0
+
+== qkv: N=4096, K=1024, weight 8.0 MiB in bf16, 4.0 MiB in int8
+     M |   bf16 us |   int8 us | dequant+bf16 us | bf16/int8 | bf16 GB/s | int8 GB/s | bf16 TFLOPS | int8 TFLOPS
+  2000 |    1045.5 |    1239.0 |          1279.0 |      0.84 |        28 |        20 |       16.05 |       13.54
+  2017 |    1039.9 |     889.9 |          1215.0 |      1.17 |        28 |        28 |       16.27 |       19.01
+  2048 |     975.9 |    1080.3 |          1227.8 |      0.90 |        30 |        23 |       17.60 |       15.90
+  4000 |    1886.2 |    2300.9 |          2265.1 |      0.82 |        26 |        20 |       17.79 |       14.58
+  4096 |    2002.9 |    2285.6 |          2155.5 |      0.88 |        25 |        20 |       17.15 |       15.03
+   relative error, M=16: kernel 1.7e-03 (vs. exact result with the int8 weights), quantization 8.0e-03 (vs. exact result with the bf16 weights), bf16 F.linear for reference 1.7e-03
+   relative error, M=4096: kernel 1.7e-03 (vs. exact result with the int8 weights), quantization 8.0e-03 (vs. exact result with the bf16 weights), bf16 F.linear for reference 1.7e-03
+
+== o: N=1024, K=2048, weight 4.0 MiB in bf16, 2.0 MiB in int8
+     M |   bf16 us |   int8 us | dequant+bf16 us | bf16/int8 | bf16 GB/s | int8 GB/s | bf16 TFLOPS | int8 TFLOPS
+  2000 |     474.1 |     515.1 |           622.6 |      0.92 |        35 |        28 |       17.69 |       16.29
+  2017 |     510.5 |     603.1 |           668.7 |      0.85 |        32 |        24 |       16.57 |       14.03
+  2048 |     572.4 |     608.3 |           701.4 |      0.94 |        29 |        24 |       15.01 |       14.12
+  4000 |    1000.4 |    1127.4 |          1142.3 |      0.89 |        29 |        24 |       16.77 |       14.88
+  4096 |     964.6 |    1129.5 |          1120.8 |      0.85 |        30 |        24 |       17.81 |       15.21
+   relative error, M=16: kernel 1.7e-03 (vs. exact result with the int8 weights), quantization 8.4e-03 (vs. exact result with the bf16 weights), bf16 F.linear for reference 1.6e-03
+   relative error, M=4096: kernel 1.7e-03 (vs. exact result with the int8 weights), quantization 8.5e-03 (vs. exact result with the bf16 weights), bf16 F.linear for reference 1.7e-03
+
+== gate_up: N=6144, K=1024, weight 12.0 MiB in bf16, 6.0 MiB in int8
+     M |   bf16 us |   int8 us | dequant+bf16 us | bf16/int8 | bf16 GB/s | int8 GB/s | bf16 TFLOPS | int8 TFLOPS
+  2000 |    1596.9 |    1870.8 |          2097.2 |      0.85 |        26 |        19 |       15.76 |       13.45
+  2017 |    1554.9 |    1962.0 |          2064.9 |      0.79 |        27 |        18 |       16.32 |       12.94
+  2048 |    1496.1 |    1848.3 |          2098.2 |      0.81 |        28 |        19 |       17.23 |       13.94
+  4000 |    3099.6 |    3521.5 |          3587.1 |      0.88 |        23 |        18 |       16.24 |       14.29
+  4096 |    3059.7 |    3691.5 |          3687.4 |      0.83 |        23 |        18 |       16.84 |       13.96
+   relative error, M=16: kernel 1.7e-03 (vs. exact result with the int8 weights), quantization 8.0e-03 (vs. exact result with the bf16 weights), bf16 F.linear for reference 1.7e-03
+   relative error, M=4096: kernel 1.7e-03 (vs. exact result with the int8 weights), quantization 8.0e-03 (vs. exact result with the bf16 weights), bf16 F.linear for reference 1.7e-03
+
+== down: N=1024, K=3072, weight 6.0 MiB in bf16, 3.0 MiB in int8
+     M |   bf16 us |   int8 us | dequant+bf16 us | bf16/int8 | bf16 GB/s | int8 GB/s | bf16 TFLOPS | int8 TFLOPS
+  2000 |     797.7 |     858.1 |          1017.9 |      0.93 |        28 |        23 |       15.77 |       14.66
+  2017 |     759.8 |     926.7 |           973.8 |      0.82 |        30 |        21 |       16.70 |       13.69
+  2048 |     793.6 |     885.8 |          1004.5 |      0.90 |        29 |        22 |       16.24 |       14.55
+  4000 |    1538.0 |    1749.0 |          1766.4 |      0.88 |        25 |        21 |       16.36 |       14.39
+  4096 |    1525.2 |    1736.2 |          1715.7 |      0.88 |        26 |        21 |       16.90 |       14.84
+   relative error, M=16: kernel 1.7e-03 (vs. exact result with the int8 weights), quantization 8.7e-03 (vs. exact result with the bf16 weights), bf16 F.linear for reference 1.7e-03
+   relative error, M=4096: kernel 1.7e-03 (vs. exact result with the int8 weights), quantization 8.6e-03 (vs. exact result with the bf16 weights), bf16 F.linear for reference 1.7e-03
+
+== The four linear layers of all 28 layers, per step (ms)
+     M |     bf16 |     int8 | bf16/int8
+  2000 |   109.60 |   125.53 |      0.87
+  2017 |   108.22 |   122.69 |      0.88
+  2048 |   107.46 |   123.83 |      0.87
+  4000 |   210.68 |   243.57 |      0.86
+  4096 |   211.47 |   247.60 |      0.85

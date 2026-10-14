@@ -1,0 +1,6 @@
+total=8188  used=2346  peak=1613  current=1165  reserved=1234 MiB
+upstream bf16: 163 blocks
+total=8188  used=2346  peak=1613  current=1165  reserved=1234 MiB
+pr-281 bf16: 163 blocks
+total=8188  used=1872  peak=1201  current=752  reserved=760 MiB
+pr-281 int8: 180 blocks

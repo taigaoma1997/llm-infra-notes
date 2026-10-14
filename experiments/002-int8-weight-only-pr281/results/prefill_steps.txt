@@ -1,0 +1,12 @@
+
+main, bf16: 163 blocks -> 26 prefill steps, 1492 decode steps, 34 preemptions, 52438 prefill tokens
+  prefill tokens per step: [15705, 16364, 2359, 31, 313, 927, 838, 640, 795, 667, 1669, 1110, 1000, 234, 569, 565, 1076, 1162, 1198, 574, 547, 562, 1826, 673, 170, 864]
+  2 steps of 8192 tokens or more (32069 tokens); 24 smaller steps (20369 tokens)
+  linear layers over these prefill steps with the bf16 kernel: about 2.78 s
+  linear layers over these prefill steps with the int8 kernel: about 4.66 s
+
+PR #281, int8: 180 blocks -> 20 prefill steps, 1233 decode steps, 24 preemptions, 48572 prefill tokens
+  prefill tokens per step: [15705, 16364, 2359, 598, 661, 360, 727, 711, 1071, 683, 176, 1163, 1478, 1325, 727, 325, 932, 681, 1613, 913]
+  2 steps of 8192 tokens or more (32069 tokens); 18 smaller steps (16503 tokens)
+  linear layers over these prefill steps with the bf16 kernel: about 2.56 s
+  linear layers over these prefill steps with the int8 kernel: about 4.43 s

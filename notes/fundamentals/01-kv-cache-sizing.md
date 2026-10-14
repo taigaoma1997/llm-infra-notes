@@ -48,9 +48,22 @@ It then allocates one tensor of shape `[2, layers, blocks, 256, KV heads, head s
 
 The cache limits how many requests run at once, through their length. With 1024 blocks (262,144 tokens, 28 GiB for this model), requests of 500 + 300 tokens need 4 blocks each by the end, so at most 256 of them can finish together, while `max_num_seqs` allows 512. nano-vllm admits a request as soon as its prompt fits (2 blocks), so 512 get in, and as they grow, it has to preempt. [Experiment 001](../../experiments/001-preemption-1000-requests/) shows when: 171 preempted at step 29, when each needs a third block, and 85 more at step 285.
 
-### 5. A check on my laptop
+### 5. Measured on my laptop
 
-mini-sglang, on the same RTX 4060 Laptop GPU (8 GB) and the same model, reported a KV cache of 47,008 tokens in 5.02 GiB with `memory_ratio` 0.9 ([mini-sglang notes](../mini-sglang/README.md)). 5.02 GiB ÷ 47,008 = 112 KiB per token, as the formula says.
+On the RTX 4060 Laptop GPU (8 GB, 8188 MiB), nano-vllm gets **163 blocks**: 41,728 tokens, 4.46 GiB. The terms of the formula, read just before the cache is allocated ([experiment 002](../../experiments/002-int8-weight-only-pr281/), `kv_blocks.py`):
+
+| Term | MiB | What it is |
+|---|---|---|
+| total × 0.9 | 7369 | |
+| used | 2346 | Everything on the GPU: 1165 MiB of live tensors (almost all weights), 69 MiB that PyTorch keeps cached without a tensor in it, and 1112 MiB outside PyTorch (the CUDA context, loaded kernels, other programs) |
+| peak − current | 448 | The extra memory of the largest step, a 16,384-token prefill: mostly the MLP's intermediate tensors (16,384 × 6,144 × 2 bytes = 192 MiB for gate_up's output alone) |
+| left for the KV cache | 4575 | 163 blocks of 28 MiB |
+
+The 1165 MiB of weights break down into the embedding, shared with the LM head (297 MiB), the linear layers (840 MiB), and a 20 MiB table of rotary-embedding values. That table is built for the model's 40,960 positions, although `max_model_len` is 4096.
+
+With the linear weights quantized to int8 ([PR #281](../nano-vllm/issues/281-int8-weight-only-quantization.md)), `current` drops by 413 MiB, the cached part by 61 MiB, and nano-vllm gets 180 blocks.
+
+mini-sglang, on the same GPU and model, reported a KV cache of 47,008 tokens in 5.02 GiB with `memory_ratio` 0.9 ([mini-sglang notes](../mini-sglang/README.md)). 5.02 GiB ÷ 47,008 = 112 KiB per token, as the formula says.
 
 ## Code map
 
@@ -63,11 +76,11 @@ mini-sglang, on the same RTX 4060 Laptop GPU (8 GB) and the same model, reported
 
 - Computed the sizes from the model config.
 - mini-sglang's reported cache size on my laptop matches 112 KiB per token (section 5).
-- Not measured yet: how many blocks nano-vllm gets on my 8 GB GPU, and how much of the memory goes to the warmup peak and the CUDA graph pool.
+- Printed the formula's terms at the start of `allocate_kv_cache` (section 5), and checked that they give the block count nano-vllm allocates.
 
 ## Open questions
 
-- Where do the 8 GB go on my laptop: weights, KV cache, the peak of the largest step, the CUDA graphs?
+- The CUDA graphs are recorded after the cache is sized, so their memory pool has to fit in the last 10%. How large is it?
 
 ## References
 

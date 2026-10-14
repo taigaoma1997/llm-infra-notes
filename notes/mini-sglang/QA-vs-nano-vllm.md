@@ -2,13 +2,13 @@
 
 读完两边的主干代码以后，我问的一个大问题：nano-vllm 和 mini-sglang 到底有什么区别？这一页用同一个例子，把两边一步一步对照着走一遍。nano-vllm 的文件夹里有同样的一份（[QA-vs-mini-sglang](../nano-vllm/QA-vs-mini-sglang.md)），两份正文一样。SGLang 本体在这些地方怎么做，见 [SGLang 的 QA-vs-mini-sglang](../sglang/QA-vs-mini-sglang.md)。
 
-代码：mini-sglang [`9a91cfa`](https://github.com/sgl-project/mini-sglang/tree/9a91cfafe754aa85daee49998176275667eb58f2)，nano-vllm [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)。2026-10-12 整理。
+代码：mini-sglang [`9a91cfa`](https://github.com/sgl-project/mini-sglang/tree/9a91cfafe754aa85daee49998176275667eb58f2)，nano-vllm [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)。2026-10-12 整理，10-14 补了用调度器模拟把整个例子跑完的结果（3.1）。
 
 **结论先说**
 
 - 两个都是把一个大框架缩小成几千行：nano-vllm 缩的是 vLLM，mini-sglang 缩的是 SGLang。主干一样：每一步重新选人，prefill 优先，一步只做一种，KV cache 分页存，每一层先写 K/V 再算 attention，decode 用 CUDA graph，多卡按 head 切（第 1 部分）
 - **KV cache 一格多大**：nano-vllm 一个 block 放 256 个 token，前缀缓存按 block 比 hash；mini-sglang 一格放 1 个 token，前缀缓存是一棵 radix 树，按 token 匹配（第 2 部分）
-- **显存不够怎么办**：nano-vllm 先放进来，不够了再抢占，被抢的以后重算；mini-sglang 进场时就按 prompt + `max_tokens` 把位置预留好，从不抢占（第 3 部分）
+- **显存不够怎么办**：nano-vllm 先放进来，不够了再抢占，被抢的以后重算；mini-sglang 进场时就按 prompt + `max_tokens` 把位置预留好，从不抢占。同一个例子用调度器模拟跑完：nano-vllm 1030 步、抢占 569 次、prefill 一共算了 840,950 个 token；mini-sglang 1259 步、不抢占、prefill 正好是 prompt 的 500,000 个（第 3 部分）
 - **两步之间**：nano-vllm 每一步都等 GPU 算完、CPU 记完账，才发下一步；mini-sglang 先发下一步，再处理上一步的结果（overlap scheduling）（第 4 部分）
 - **一个程序，还是一个服务**：nano-vllm 一个进程，`generate()` 全部跑完才返回；mini-sglang 起服务时有三种进程，结果一个 token 一个 token 地发回去（第 5 部分）
 
@@ -16,7 +16,7 @@
 
 1. 共同的主干（流程图，每一步两边怎么做，贯穿全文的例子）
 2. KV cache 一格多大，决定了前缀缓存怎么做
-3. 显存不够怎么办：抢占，还是预留
+3. 显存不够怎么办：抢占，还是预留（3.1 整个例子跑完：调度器模拟）
 4. 每一步之间，GPU 要不要等 CPU
 5. 一个程序，还是一个服务
 6. 其他小区别（KV cache 开多大、CUDA graph、多卡）
@@ -110,9 +110,42 @@ mini-sglang：先算够了再放进来（放进来的不会被踢）
 - mini-sglang：最先用完的是 page table 的 256 行，不是 KV cache。256 个请求每个预留 500 + 300 = 800 格，一共 204800 格，比 262144 少，所以从头到尾格子都够，用不着抢占。
 - 换成我笔记本上 mini-sglang 实际开出来的 47008 格：47008 ÷ 800 ≈ 58.8，同时只能跑 58 个。
 
+整个例子跑完是什么样，见 3.1。
+
 **取舍：** nano-vllm 同时跑的请求多，代价是可能要重算；mini-sglang 从不重算，代价是很保守：`max_tokens` 只是上限，请求要是很早就遇到 eos，多预留的位置就白占了，同时跑的请求也就少了。代码在这里留了一句 `# TODO: better estimate policy`（[prefill.py L46](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L46)）。和 SGLang、vLLM 的对比见 [QA-scheduling 6.2 和 6.4](../nano-vllm/QA-scheduling.md)。
 
 **进来时的长度检查**也是同一个思路：mini-sglang 收到请求时，prompt 不比 `max_seq_len` 短的直接丢掉，prompt 加 `max_tokens` 超过 `max_seq_len` 的，把 `max_tokens` 改小（[scheduler.py L177-L189](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/scheduler.py#L177-L189)）。`max_seq_len` 又不会超过 KV cache 的总格子数，所以进来的请求最后总能放得下。nano-vllm 进来时不做这些检查：一个整个 KV cache 都放不下的序列会让它崩掉（[#274](../nano-vllm/issues/274-kv-cache-exhausted-assert.md)），一个长过 `max_model_len` 的序列会让 CUDA graph 出错（[#190](../nano-vllm/issues/190-cuda-graph-block-tables.md)）。
+
+### 3.1 整个例子跑完：调度器模拟
+
+两边都用调度器模拟跑：调度器是真的（mini-sglang 是真的 `Scheduler` 和 radix 树，nano-vllm 是真的 `Scheduler` 和 `BlockManager`），只把模型那一步换成假的，每个请求每一步"生成"一个固定的 token。例子里是 `ignore_eos`，每个请求都生成满 300 个，所以调度的每一步和真模型跑出来的一样。nano-vllm 的结果见 [实验 001](../../experiments/001-preemption-1000-requests/)。mini-sglang 这边，我先照着代码一步一步推出 1259 步，2026-10-14 再跑模拟，每个数都对上了。
+
+| | nano-vllm | mini-sglang |
+|---|---|---|
+| 一共几步 | 1030（prefill 56 步，decode 974 步） | 1259（prefill 63 步，decode 1196 步） |
+| 抢占 | 569 次 | 0 |
+| prefill 一共算了多少 token | 840,950，其中 340,950 是被抢占的序列重算的 | 500,000，正好是 1000 个 prompt，一个都没重算 |
+| 一步 decode 最多几个请求 | 512，抢占以后是 341、256 | 256 |
+| 第一批进场停在哪 | 第 16 步，block 用完了 | 第 16 步，page table 的 256 行用完了 |
+
+mini-sglang 这一边是这样走的（数字是每一步交给 GPU 那一刻的值）：
+
+| 步 | 发生了什么 | 例子里的数 |
+|---|---|---|
+| 1–15 | prefill，每步正好 8192 个 token：放满整个的请求以后，剩下的预算切给下一个请求 | 每步 17 或 18 个请求，其中 1 个被切开 |
+| 16 | 先算完上一步被切开的那个，再放 10 个新的，page table 的 256 行就满了 | 11 个请求，5120 个 token |
+| 17–315 | decode，256 个请求一起，长度从 501 长到 800。格子是进场时预留好的，从来不会不够 | 空格子从 134144 降到 57600 |
+| 315 | 256 个请求同时生成满 300 个，结束。整条序列（799 个 token）留在 radix 树里，变成可以驱逐的 | 可驱逐 204544 |
+| 316–331 | 第二批 256 个 prefill。空格子只有 57600，到第 323 步就不够了，开始驱逐第一批留下的 | 驱逐一次一整个节点，凑够就停，所以之后空格子一直只有几十到几百 |
+| 332–945 | 第二批 decode（到第 630 步结束），第三批同样走一遍（631–945） | |
+| 946–1259 | 最后 232 个：15 步 prefill（第 960 步只剩 3 个请求，1312 个 token），然后 299 步 decode | |
+
+另外两个结果：
+
+- **overlap 开和关，跑出来都是 1259 步**。每一步放谁、算多少 token、空格子和可驱逐的格子有多少，全都一样；只有"正在用的格子"（`protected`）那一列不一样，见第 7 部分第 3、4 题。在这个例子里，overlap 没有改变调度的决定。
+- **换成我笔记本的 47008 格**：每批 58 个。4 步 prefill（第 4 步先算完被切开的那个，再放 8 个新的，预留就不够了），加 299 步 decode，一批 303 步；17 批 58 个，最后一批 14 个，一共 5451 步。
+
+步数不是时间：mini-sglang 一步 prefill 最多 8192 个 token，nano-vllm 是 16384；decode 时 mini-sglang 一步 256 个请求，nano-vllm 一开始是 512 个。所以 1259 步比 1030 步多，并不说明 mini-sglang 慢。能说明的是：它一个 token 都没有重算。
 
 ---
 
@@ -174,3 +207,7 @@ CPU 不知道的只有 token 的值。所以代价是调度器手里的信息晚
    提示：mini-sglang 每个请求要预留多少格？nano-vllm 进场时要几个 block？
 2. 1000 个请求共用一段 400 token 的 system prompt，同时到达。第一步 prefill 的那些请求，两个引擎各能复用多少前缀？第二步进来的呢？
    提示：nano-vllm 看 [#219](../nano-vllm/issues/219-same-step-prefix-sharing.md)（block 什么时候登记）；mini-sglang 看第 4 部分（overlap 让插进树晚一步）。mini-sglang 这边可以用调度器模拟验证：把 prompt 写成具体的 token，开头相同就会命中 radix 树。
+3. 3.1 的模拟里，overlap 开和关的 `protected`（锁住、正在用的格子）那一列总差一步：第 2 步发出时，overlap 关是 8000，开是 0；之后每个 prefill 步都是这样。为什么？
+   提示：表里的数是第 k 步交给 GPU 那一刻的值。第 1 步那 16 个完整的请求，prompt 是什么时候插进 radix 树、锁住的？这和第 4 部分说的"晚一步"是同一个时间窗口。
+4. decode 时，overlap 开的 `protected` 是 128011，关是 128000；最后一批是 116003 和 116000。多出来的 11 和 3，正好是每批最后一个 prefill 步的请求数（第 16 步 11 个，第 960 步 3 个）。为什么偏偏是这些请求，各多了一个 token 在树里？
+   提示：`cache_req` 插进树的是 `input_ids[:cached_len]`。overlap 开时，第 16 步的结果要等第 17 步发出以后才处理；第 17 步发出时，`complete_one` 已经对这 11 个请求做了什么？前面那些 prefill 步的请求为什么没有多？
