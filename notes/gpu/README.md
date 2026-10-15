@@ -1,8 +1,17 @@
 # GPU programming
 
-> Status: planned
+> Status: started (Q&A pages)
 
 Some basics already came up while reading nano-vllm: what a kernel is, grids, blocks and threads, a naive and a tiled matmul, Triton versus CUDA, the kernels `torch.compile` generates, and how to read the kernels inside a recorded CUDA graph. They are in my Chinese Q&A page [QA-cuda-graph.md](../nano-vllm/QA-cuda-graph.md), section 5.
+
+## Q&A (in Chinese)
+
+The questions I asked while learning the basics, with answers. They started from reading the Triton kernel in nano-vllm [PR #281](../nano-vllm/issues/281-int8-weight-only-quantization.md), and the numbers come from my RTX 4060 Laptop GPU ([experiment 002](../../experiments/002-int8-weight-only-pr281/), `gpu_facts.py`).
+
+| Topic | Page | Covers |
+|---|---|---|
+| GPU hardware | [QA-gpu.md](QA-gpu.md) | SMs, L2 and memory; what is inside an SM (warp schedulers, CUDA cores, Tensor Cores, registers, shared memory); threads, warps, blocks and how many blocks fit on an SM; the memory hierarchy; the rules for writing a kernel that follow from the hardware; when a kernel is limited by memory bandwidth or by compute; this GPU's numbers, including a measured copy bandwidth of about 196 GB/s |
+| Triton | [QA-triton.md](QA-triton.md) | What Triton is and how it compiles; the vector-add example; the common operations (`program_id`, `arange`, pointers, `load` with masks, `dot`, `constexpr`) and the launch syntax; what PR #281's kernel compiles to (`cp.async`, `ldmatrix`, `mma.sync` on Tensor Cores) with its registers and shared memory; how many programs fit on an SM, and how that explains the kernel's speed |
 
 ## Plan
 

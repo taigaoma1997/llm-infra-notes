@@ -28,5 +28,8 @@ for i in 1 2 3; do
   PYTHONPATH="$NANO_VLLM_PR" "$py" bench_breakdown.py int8
 done
 
-# 4. The size of every prefill step (scheduler only, CPU)
+# 4. Hardware numbers, copy bandwidth, and what the kernel compiles to
+PYTHONPATH="$NANO_VLLM_PR" "$py" gpu_facts.py | tee results/gpu_facts.txt
+
+# 5. The size of every prefill step (scheduler only, CPU)
 PYTHONPATH="$NANO_VLLM_MAIN" "$py" prefill_steps.py | tee results/prefill_steps.txt

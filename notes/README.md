@@ -9,7 +9,7 @@ One folder per project or topic. Each note answers one question, and each folder
 | [mini-sglang](mini-sglang/) | SGLang's main ideas in about 5,000 lines: radix cache, chunked prefill, overlap scheduling | in progress |
 | [sglang](sglang/) | the production engine, after mini-sglang | next |
 | [vllm](vllm/) | the engine PagedAttention came from, compared with nano-vllm | planned |
-| [gpu](gpu/) | Triton and CUDA exercises, profiling | planned |
+| [gpu](gpu/) | Triton and CUDA exercises, profiling; Q&A on GPU hardware and Triton | started |
 | [miles](miles/) | RL post-training infrastructure | planned |
 | [tunix](tunix/) | Google's post-training library in JAX: SFT, RL, agentic RL | planned |
 | [papers](papers/) | reading list with short notes | ongoing |

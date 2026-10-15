@@ -24,6 +24,7 @@
 | [bench_kernel.py](bench_kernel.py) | The PR's kernel alone against bf16 `F.linear` (cuBLAS), for Qwen3-0.6B's four linear-layer shapes and M from 1 to 16,384 (M = tokens in the step: the batch size in decode, the prompt tokens of the step in prefill) |
 | [bench_breakdown.py](bench_breakdown.py) | The `bench.py` workload end to end, with every step timed and classified as prefill or decode, and preemptions counted. Three rounds, alternating main bf16, PR bf16 and PR int8 |
 | [prefill_steps.py](prefill_steps.py) | The size of every prefill step, by replaying the same workload through the real scheduler without a model |
+| [gpu_facts.py](gpu_facts.py) | The GPU's hardware numbers, its measured copy bandwidth, and what the PR's kernel compiles to: registers, shared memory and PTX instructions per tile configuration |
 
 Each configuration runs in a new process. The scheduler's decisions depend only on token counts, so the three bf16 runs make identical steps, and the replay in `prefill_steps.py` matches the real runs step for step (same step counts, preemptions and prefill tokens).
 
@@ -102,6 +103,17 @@ Prefill steps average about 2000 tokens, where the kernel is only 13–16% slowe
 | PR int8 | the same two steps | 18 steps of 176 to 2,359 tokens, 16,503 tokens in total |
 
 All 64 requests arrive together, so the first two steps fill the 16,384-token budget; the later ones are preempted sequences coming back and stragglers. Interpolating the kernel table over every step gives 2.78 s of linear-layer time for bf16 and 4.43 s for int8, a difference of 1.65 s against the 1.49 s measured. The two large steps alone account for about 1.8 s; fewer recomputed tokens give back 0.2 s.
+
+### 5. What the kernel compiles to
+
+From [results/gpu_facts.txt](results/gpu_facts.txt). The GPU has 24 SMs, 65,536 registers and about 99 KB of shared memory per SM, and a 32 MiB L2; memory bandwidth is 256 GB/s in theory and about 196 GB/s measured with a 512 MiB copy.
+
+| Tile configuration | Threads per program | Registers per thread | Shared memory per program | Programs per SM at once |
+|---|---|---|---|---|
+| 16 × 64 × 64, 3 stages (M ≤ 64) | 128 | 58 | 12,288 bytes | about 7 (registers allow 8; shared memory, with the 1 KB the driver reserves per block, allows 7) |
+| 64 × 64 × 64, 4 stages (M > 64) | 128 | 129 | 36,864 bytes | 2 (registers allow 3; shared memory allows 2) |
+
+The PTX shows the expected instructions: `cp.async` copies tiles from global to shared memory asynchronously (the shared memory holds 2 and 3 copies of a tile pair, one per stage being loaded ahead), `ldmatrix` loads the bf16 x tile into registers, `ld.shared` and `cvt.rn.f32.s8` load and convert the int8 weight tile, and `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` runs on the Tensor Cores. Two facts explain the measurements above: a narrow layer at M = 1 launches 16 programs, so 8 of the 24 SMs stay idle and each busy SM has only 4 warps to hide memory latency with; and the large-M configuration fits only 2 programs (8 warps) per SM.
 
 ## Conclusion
 

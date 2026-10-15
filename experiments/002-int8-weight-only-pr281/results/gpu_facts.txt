@@ -1,0 +1,30 @@
+== torch device properties
+  name: NVIDIA GeForce RTX 4060 Laptop GPU
+  major: 8
+  minor: 9
+  multi_processor_count: 24
+  total_memory: 8585216000
+  L2_cache_size: 33554432
+  warp_size: 32
+  max_threads_per_multi_processor: 1536
+  regs_per_multiprocessor: 65536
+== triton driver properties
+  {'max_shared_mem': 101376, 'max_num_regs': 65536, 'multiprocessor_count': 24, 'warpSize': 32, 'sm_clock_rate': 1890000, 'mem_clock_rate': 8001000, 'mem_bus_width': 128}
+  theoretical bandwidth = 2 x 8001 MHz x 128 bit / 8 = 256 GB/s
+  FP32 peak without Tensor Cores = 3072 units x 2 x 1.89 GHz = 11.6 TFLOPS
+== measured copy bandwidth (512 MiB tensor, read + write)
+  median 6.39 ms -> 168 GB/s
+== PR #281's kernel compiled for this GPU (qkv shape: N=4096, K=1024)
+  BLOCK_M=16, num_stages=3: grid=(1, 64), threads per program=128, registers per thread=58, spills=0, shared memory per program=12288 bytes
+   PTX instructions in the code: {'mma.sync (Tensor Core)': 8, 'ldmatrix (shared memory -> registers)': 3, 'cp.async (global -> shared, asynchronous)': 9, 'ld.global': 2, 'st.global': 1, 'bar.sync': 6, 'cvt (type conversion)': 62}
+   e.g. mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { %f103, %f104, %f105, %f106 }, { %r372, %r371, %r370, %r369 }, { %r363, %r364 }, { %f103, %f104, %f105, %f106 }
+   e.g. cp.async.cg.shared.global [ %r103 + 0 ], [ %rd14 + 0 ], 0x10, %r104
+   e.g. cvt.rn.f32.s8 f0, s0
+  BLOCK_M=64, num_stages=4: grid=(256, 64), threads per program=128, registers per thread=129, spills=0, shared memory per program=36864 bytes
+   PTX instructions in the code: {'mma.sync (Tensor Core)': 32, 'ldmatrix (shared memory -> registers)': 6, 'cp.async (global -> shared, asynchronous)': 24, 'ld.global': 4, 'st.global': 4, 'bar.sync': 9, 'cvt (type conversion)': 137}
+   e.g. mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 { %f395, %f396, %f397, %f398 }, { %r764, %r763, %r762, %r761 }, { %r747, %r748 }, { %f395, %f396, %f397, %f398 }
+   e.g. cp.async.cg.shared.global [ %r162 + 0 ], [ %rd20 + 0 ], 0x10, %r163
+   e.g. cvt.rn.f32.s8 f0, s0
+
+# The copy bandwidth above was measured right after compiling the kernels. Repeated separately five times,
+# 512 MiB each: 196, 197, 194, 196, 196 GB/s. The laptop GPU's clock varies.

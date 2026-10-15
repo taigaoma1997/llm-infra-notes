@@ -153,7 +153,7 @@ block 数 = (总显存 × 0.9 − used − (peak − current)) ÷ 28 MiB
 
 ## 5. kernel 的代码：一步一步在算什么
 
-代码在 PR 的 [`nanovllm/layers/w8a16_gemm.py`](https://github.com/AliMizan/nano-vllm/blob/c3b7110a57ab603048774d1b52a434670f92d3ed/nanovllm/layers/w8a16_gemm.py)，一共 97 行：前 51 行是在 GPU 上跑的 kernel，后面是调用它的 Python 函数。它就是 [QA-cuda-graph](QA-cuda-graph.md) "GPU kernel"那一节里第 3、5、6 小节讲的东西：朴素矩阵乘 → 分块 + shared memory → 用 Triton 按块来写。新的地方只有三处：读 int8、在片上转成 bf16、最后乘 scale。
+代码在 PR 的 [`nanovllm/layers/w8a16_gemm.py`](https://github.com/AliMizan/nano-vllm/blob/c3b7110a57ab603048774d1b52a434670f92d3ed/nanovllm/layers/w8a16_gemm.py)，一共 97 行：前 51 行是在 GPU 上跑的 kernel，后面是调用它的 Python 函数。它就是 [QA-cuda-graph](QA-cuda-graph.md) "GPU kernel"那一节里第 3、5、6 小节讲的东西：朴素矩阵乘 → 分块 + shared memory → 用 Triton 按块来写。新的地方只有三处：读 int8、在片上转成 bf16、最后乘 scale。看不懂 `tl.load`、`tl.dot` 这些操作，或者不知道 SM、warp、shared memory 是什么，先看 [QA-triton](../gpu/QA-triton.md) 和 [QA-gpu](../gpu/QA-gpu.md)。
 
 ### 5.1 它算的是什么
 
