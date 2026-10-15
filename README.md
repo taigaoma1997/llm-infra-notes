@@ -27,8 +27,8 @@ Issues I reproduced, PRs I opened, and upstream discussions I took part in. Newe
 
 | Date | Project | Upstream | Type | Status | Write-up |
 |---|---|---|---|---|---|
+| 2026-10-10 | nano-vllm | [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) with [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) | reproduced issue | root cause found, open PR tested | [notes](notes/nano-vllm/issues/219-same-step-prefix-sharing.md) |
 | 2026-10-08 | nano-vllm | [PR #270](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) | PR comment | posted: the #190 reproduction; the author then added `Fixes #190` | [notes](notes/nano-vllm/issues/190-cuda-graph-block-tables.md#fixes-compared-the-open-prs-tested) |
-| 2026-10-07 | nano-vllm | [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) with [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) | reproduced issue | root cause found, open PR tested | [notes](notes/nano-vllm/issues/219-same-step-prefix-sharing.md) |
 | 2026-10-06 | triton-windows | [PR #56](https://github.com/triton-lang/triton-windows/pull/56) | docs PR | merged | [notes](notes/triton-windows/issues/56-pytorch-2.6-os-replace.md) |
 | 2026-10-03 | nano-vllm | [#190](https://github.com/GeeeekExplorer/nano-vllm/issues/190) | reproduced issue | root cause found, open PRs tested | [notes](notes/nano-vllm/issues/190-cuda-graph-block-tables.md) |
 | 2026-10-02 | nano-vllm | [#170](https://github.com/GeeeekExplorer/nano-vllm/issues/170) | reproduced issue | root cause found | [notes](notes/nano-vllm/issues/170-rmsnorm-fp32-residual.md) |
@@ -56,10 +56,10 @@ Full plan: [ROADMAP.md](ROADMAP.md) · Issues and PRs: [CONTRIBUTIONS.md](CONTRI
 
 <!-- Newest first, one line per week ("Week of" + the date in the update's file name), linked to the weekly update. Keep the last five. -->
 
-- **Week of 2026-10-12** Went through nano-vllm again end to end and wrote notes 01 to 04 on its request path, scheduler, block manager and model runner, plus fundamentals notes on KV cache sizing and parallelism. First experiment: 1000 requests through the real scheduler without a GPU, to see when it preempts. Compared nano-vllm with mini-sglang on the same example, then mini-sglang with SGLang. Tested nano-vllm PR #281 (INT8 weight-only quantization): it saves memory but is not faster end to end on my laptop GPU, and timing every step showed why. Wrote down GPU hardware and Triton basics to read its kernel: [update](updates/2026/2026-10-12.md)
+- **Week of 2026-10-12** Went through nano-vllm again end to end and wrote notes 01 to 04 on its request path, scheduler, block manager and model runner, plus fundamentals notes on KV cache sizing and parallelism. First experiment: 1000 requests through the real scheduler without a GPU, to see when it preempts. Compared nano-vllm with mini-sglang on the same example, then mini-sglang with SGLang. Tested nano-vllm PR #281 (INT8 weight-only quantization): it saves memory but is not faster end to end on my laptop GPU, and timing every step showed why. Wrote down GPU hardware and Triton basics to read its kernel, then studied them from online lectures: [update](updates/2026/2026-10-12.md)
 - **Week of 2026-10-05** Started mini-sglang: set it up in WSL2 on Windows, ran it end to end, built the same test tools as for nano-vllm, sorted its open issues and PRs, and learned how its processes, KV cache, radix cache and overlap scheduling work. Looked inside nano-vllm's recorded CUDA graphs for #190, reproduced it, tested the open PRs that fix it, and posted the reproduction on #270. Worked through nano-vllm's prefix cache (#219 with #208) and the scheduler design around it. Opened a docs PR to triton-windows (#56), merged on 2026-10-09: [update](updates/2026/2026-10-05.md)
 - **Week of 2026-09-29** Fixed nano-vllm #274, reported #279, opened my first upstream PR (#280), reproduced #170 and compared its fixes, started #190: [update](updates/2026/2026-09-29.md)
-- **Week of 2026-09-25** Sorted nano-vllm's open issues and reproduced #274: [update](updates/2026/2026-09-25.md)
+- **Week of 2026-09-25** Sorted all 111 nano-vllm issues and reproduced #274: [update](updates/2026/2026-09-25.md)
 - **Week of 2026-09-24** Started this repo and wrote down what I did before it: [update](updates/2026/2026-09-24-backfill.md)
 
 ## Layout

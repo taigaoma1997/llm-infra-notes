@@ -199,7 +199,7 @@ prefix cache 省的是计算：命中的 token 不用再过模型。可后面的
 
 ### 4.2 代码里怎么做：query 只有新 token，key 是全部 token
 
-以 B 为例：600 个 token，前 512 个命中 block 0、1。[`prepare_prefill`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L128-L170) 给 B 准备的输入：
+以 B 为例：600 个 token，前 512 个命中 block 0、1。[`prepare_prefill`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L129-L170) 给 B 准备的输入：
 
 | 变量 | B 的值 | 意思 |
 |---|---|---|
@@ -243,7 +243,7 @@ module.k_cache = self.kv_cache[0, layer_id]
 
 所以“block 5”指的是**每一层**里第 5 块的 256 个位置，28 层各有一份：第 10 层的 block 5 和第 9 层的 block 5 是两块不同的显存。一个序列的 `block_table = [5, 9, 12]`，意思是在每一层里都去读那一层的 5、9、12。block 不会移动，也不会合并：一个序列的 K/V 分散在几个不连续的 block 里，`block_table` 按顺序记下来，attention 按表去读（这就是 PagedAttention，[#190](issues/190-cuda-graph-block-tables.md) 里的 `block_tables` 就是这张表）。
 
-一次 forward 里，整个 batch 一层一层往上走（[qwen3.py L180-L181](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L178-L183)），所有 token 走完第 L-1 层，才一起进入第 L 层。每一层里和 KV cache 有关的是三个 kernel，在同一个 GPU stream 上按顺序执行，前一个做完，后一个才开始：
+一次 forward 里，整个 batch 一层一层往上走（[qwen3.py L180-L181](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L180-L181)），所有 token 走完第 L-1 层，才一起进入第 L 层。每一层里和 KV cache 有关的是三个 kernel，在同一个 GPU stream 上按顺序执行，前一个做完，后一个才开始：
 
 | 顺序 | kernel | 做什么 |
 |---|---|---|
@@ -268,7 +268,7 @@ module.k_cache = self.kv_cache[0, layer_id]
 slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1)
 ```
 
-写入的 kernel（[attention.py L11-L31](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L11-L31)）：每个 token 读自己的 slot，`slot == -1` 就跳过（#190 里 CUDA graph 的空座位），否则把 k、v 写到 `slot × D` 的位置。forward 结束时，K/V 早就在各自的 block 里了。
+写入的 kernel（[attention.py L10-L30](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L10-L30)）：每个 token 读自己的 slot，`slot == -1` 就跳过（#190 里 CUDA graph 的空座位），否则把 k、v 写到 `slot × D` 的位置。forward 结束时，K/V 早就在各自的 block 里了。
 
 ### 4.4 例子：D 的前 10 个 block 命中
 
@@ -341,7 +341,7 @@ D 命中的 block 在以前某一步里 **28 层都已经写满**，第几层读
 
 先要分清两层：`dict->`、`user`、`block_table` 是 CPU 上的**记账**，记的只是 block 编号；`K/V` 是 GPU 上的**数据**。“B 看到 A”发生在记账这一层，那时 GPU 还一个 token 都没算。
 
-**旧版：分配时就登记**（[旧版 `allocate` L79-L81](https://github.com/GeeeekExplorer/nano-vllm/blob/44a51afc8a7f60e75ce3f4ee94632430eff9de65/nanovllm/engine/block_manager.py#L59-L82)）
+**旧版：分配时就登记**（[旧版 `allocate` L79-L81](https://github.com/GeeeekExplorer/nano-vllm/blob/44a51afc8a7f60e75ce3f4ee94632430eff9de65/nanovllm/engine/block_manager.py#L79-L81)）
 
 ① schedule：分配 A。字典**马上**指向 0、1，可 `K/V` 一行全是 `empty`，GPU 还没算。这就是 #208 担心的状态
 
@@ -453,7 +453,7 @@ dict->|   h0    |   h1    |         |         |         |         |         |
       +---------+---------+---------+---------+---------+---------+---------+
 ```
 
-④-b postprocess：B 再登记。`h0`、`h1` 是同一个 key，后写的覆盖先写的（[`hash_blocks` L120](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L110-L120) 就是一句普通的字典赋值），`dict->` 从 0、1 挪到了 3、4。这时 A 还在用 0、1，字典里却已经没有指向它们的登记了，这是 #219 的第二个后果
+④-b postprocess：B 再登记。`h0`、`h1` 是同一个 key，后写的覆盖先写的（[`hash_blocks` L120](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L120) 就是一句普通的字典赋值），`dict->` 从 0、1 挪到了 3、4。这时 A 还在用 0、1，字典里却已经没有指向它们的登记了，这是 #219 的第二个后果
 
 ```
            0         1         2         3         4         5         6
@@ -633,7 +633,7 @@ nano-vllm 为了代码简单，做了几个选择；生产级引擎在这些地�
 
 **什么时候接新的？** 没有固定时刻，每一步都检查：空闲 block 够队头那条的 prompt 用（扣掉 prefix cache 命中的），而且这一步的 token 预算还没用完。序列在 `postprocess` 里结束、释放 block，所以结束后的下一步就会尝试（第 1 部分 step 50–51）。
 
-在我的笔记本上，真正卡住数量的是 KV cache 的容量，不是 512：600-token 的 prompt 最多同时跑 60 多条。另外 nano-vllm 进来时并不限制 running 的总数，512 只限制每一步：running 超过 512 条时，每步只 decode 前 512 条（[L58](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L58)）。
+在我的笔记本上，真正卡住数量的是 KV cache 的容量，不是 512：600-token 的 prompt 最多同时跑 50 多条（每条 3 个 block，163 ÷ 3 ≈ 54）。另外 nano-vllm 进来时并不限制 running 的总数，512 只限制每一步：running 超过 512 条时，每步只 decode 前 512 条（[L58](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L58)）。
 
 batch 变小只发生在离线任务的尾巴上：快做完时 running 只剩几条。batch 小时，一步 decode 的时间主要花在读一遍模型权重上，12 条和 50 条差不多，每个 token 摊到的成本更高。真实 serving 里请求一直在进来，batch 一直是满的。
 

@@ -1,6 +1,6 @@
 # 01 · How much memory does the KV cache take, and how many requests fit?
 
-> Examples: Qwen3-0.6B in bf16, nano-vllm @ [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/commit/bb823b3e06983d71485a8e1f23715ebd87d98ef8) · Written: 2026-10-12 · Status: draft
+> Examples: Qwen3-0.6B in bf16, nano-vllm @ [`bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/commit/bb823b3e06983d71485a8e1f23715ebd87d98ef8) · Written: 2026-10-12 · Updated: 2026-10-14 · Status: draft
 
 ## Question
 
@@ -59,7 +59,7 @@ On the RTX 4060 Laptop GPU (8 GB, 8188 MiB), nano-vllm gets **163 blocks**: 41,7
 | peak − current | 448 | The extra memory of the largest step, a 16,384-token prefill: mostly the MLP's intermediate tensors (16,384 × 6,144 × 2 bytes = 192 MiB for gate_up's output alone) |
 | left for the KV cache | 4575 | 163 blocks of 28 MiB |
 
-The 1165 MiB of weights break down into the embedding, shared with the LM head (297 MiB), the linear layers (840 MiB), and a 20 MiB table of rotary-embedding values. That table is built for the model's 40,960 positions, although `max_model_len` is 4096.
+Most of the 1165 MiB is the model, 1157 MiB in all: the embedding, shared with the LM head (297 MiB), the linear layers (840 MiB), and a 20 MiB table of rotary-embedding values. That table is built for the model's 40,960 positions, although `max_model_len` is 4096.
 
 With the linear weights quantized to int8 ([PR #281](../nano-vllm/issues/281-int8-weight-only-quantization.md)), `current` drops by 413 MiB, the cached part by 61 MiB, and nano-vllm gets 180 blocks.
 

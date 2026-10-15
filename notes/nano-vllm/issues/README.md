@@ -1,6 +1,6 @@
 # nano-vllm issue write-ups
 
-One page per issue I reproduced. Create one with `scripts/new.sh issue nano-vllm <number> <slug> "<title>"`.
+One page per issue I reproduced or PR I tested. Create one with `scripts/new.sh issue nano-vllm <number> <slug> "<title>"`.
 
 | Issue | Title | Status | Write-up |
 |---|---|---|---|

@@ -18,7 +18,7 @@
 - **Lecture 6：Kernels, Triton**，演示怎么写 kernel、怎么 benchmark、怎么 profile。
 - 后面还可以看 Lecture 7、8（并行）和 Lecture 10（推理）。
 - 视频在 Stanford Online 的 YouTube 频道：[播放列表](https://www.youtube.com/playlist?list=PLoROMvodv4rOY23Y0BoGoBGgQ1zmU_MT_)，课程主页 [cs336.stanford.edu/spring2025](http://cs336.stanford.edu/spring2025/)。
-- 2026 春也有一版，第 5 讲变成了 "GPUs, TPUs"。这是从[第三方页面](https://summify.io/discover/xnDHaNUvHBg)看到的，没有核实。
+- 2026 春也有一版，第 6 讲变成了 "Kernels, Triton, XLA"。这是从[第三方页面](https://summify.io/discover/xnDHaNUvHBg)看到的，没有核实。
 
 ### 2. GPU MODE 讲座系列
 
@@ -61,7 +61,7 @@ YouTube [@GPUMODE](https://www.youtube.com/@GPUMODE)，资料在 [gpu-mode/lectu
 
 ## 配合着动手
 
-- **[Triton-Puzzles](https://github.com/srush/Triton-Puzzles)**（Sasha Rush）：从最简单的题一路做到 Flash Attention 和量化矩阵乘。它用 Triton 的解释器运行，不需要 GPU。看完 CS336 第 6 讲或 GPU MODE 第 14 讲就可以开始做。
+- **[Triton-Puzzles](https://github.com/gpu-mode/Triton-Puzzles)**（Sasha Rush）：从最简单的题一路做到 Flash Attention 和量化矩阵乘。它用 Triton 的解释器运行，不需要 GPU。看完 CS336 第 6 讲或 GPU MODE 第 14 讲就可以开始做。
 - **[GPU-Puzzles](https://github.com/srush/GPU-Puzzles)**：同一个作者，用 Numba 写，更偏 CUDA 的思维方式。
 - **[Modal GPU Glossary](https://modal.com/gpu-glossary/readme)**：不是课，是一本可以互相跳转的 GPU 术语手册，适合遇到名词时查。也有[中文翻译版](https://gpu-glossary-zh.readthedocs.io/)。
 
@@ -73,7 +73,7 @@ YouTube [@GPUMODE](https://www.youtube.com/@GPUMODE)，资料在 [gpu-mode/lectu
 - [summify.io: CS336 Spring 2026 Lecture 6](https://summify.io/discover/xnDHaNUvHBg)
 - [Izzat El Hajj courses](https://ielhajj.github.io/courses.html)
 - [Stanford CS149 Fall 2025](https://gfxcourses.stanford.edu/cs149/fall25)
-- [Triton-Puzzles](https://github.com/srush/Triton-Puzzles)
+- [Triton-Puzzles](https://github.com/gpu-mode/Triton-Puzzles)
 - [GPU Glossary](https://modal.com/gpu-glossary/readme)
 - [gpu-glossary-zh](https://gpu-glossary-zh.readthedocs.io/)
 - [MIT 6.5940 (csdiy)](https://csdiy.wiki/en/%E6%9C%BA%E5%99%A8%E5%AD%A6%E4%B9%A0%E7%B3%BB%E7%BB%9F/EML/)

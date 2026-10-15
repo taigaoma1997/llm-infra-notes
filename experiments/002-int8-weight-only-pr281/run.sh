@@ -21,7 +21,8 @@ PYTHONPATH="$NANO_VLLM_PR" "$py" bench_kernel.py | tee results/kernel_run1.txt
 PYTHONPATH="$NANO_VLLM_PR" "$py" bench_kernel.py --m 2000 2017 2048 4000 4096 \
   --out results/kernel_m2000.csv | tee results/kernel_run2.txt
 
-# 3. End to end, three rounds, alternating the configurations
+# 3. End to end, three rounds, alternating the configurations (bench_breakdown.py appends to breakdown.csv)
+rm -f results/breakdown.csv
 for i in 1 2 3; do
   PYTHONPATH="$NANO_VLLM_MAIN" "$py" bench_breakdown.py
   PYTHONPATH="$NANO_VLLM_PR" "$py" bench_breakdown.py

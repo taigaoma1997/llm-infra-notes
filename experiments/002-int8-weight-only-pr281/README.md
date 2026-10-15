@@ -26,7 +26,7 @@
 | [prefill_steps.py](prefill_steps.py) | The size of every prefill step, by replaying the same workload through the real scheduler without a model |
 | [gpu_facts.py](gpu_facts.py) | The GPU's hardware numbers, its measured copy bandwidth, and what the PR's kernel compiles to: registers, shared memory and PTX instructions per tile configuration |
 
-Each configuration runs in a new process. The scheduler's decisions depend only on token counts, so the three bf16 runs make identical steps, and the replay in `prefill_steps.py` matches the real runs step for step (same step counts, preemptions and prefill tokens).
+Each configuration runs in a new process. The scheduler's decisions depend only on token counts, so the six bf16 runs (main and the PR) make identical steps, and the replay in `prefill_steps.py` matches the real runs step for step (same step counts, preemptions and prefill tokens).
 
 ## Results
 
@@ -63,7 +63,7 @@ Full tables: [results/kernel_run1.txt](results/kernel_run1.txt), [results/kernel
 
 - **Small M is limited by memory bandwidth.** From M = 1 to 64, bf16 time hardly changes: reading the weights dominates. Halving the weight bytes helps, but only in two of the four layers. At M = 1, qkv (N = 4096) is 1.85× faster and gate_up (N = 6144) 1.54×, while o and down (N = 1024) are not faster at all and reach only about 50 GB/s. With 16-row by 64-column output tiles, a layer with N = 1024 gives 16 thread blocks for 24 SMs, and each walks the whole K dimension (2048 or 3072) alone. cuBLAS reaches about 100 GB/s on the same shapes.
 - **Large M is limited by compute**, and there cuBLAS wins: bf16 stays at 16–18 TFLOPS, the PR's kernel drops to 7–9 at M = 16,384 and takes twice as long. It has one fixed 64 × 64 × 64 tile and converts int8 to bf16 inside the loop.
-- **Fusing matters.** Rebuilding the bf16 weight first and then calling `F.linear` (third column of the full tables) is about 4× slower than bf16 at M = 1, because the weight is read and written several times. At M = 16,384 it is within 3% of bf16, twice as fast as the PR's kernel.
+- **Fusing matters.** Rebuilding the bf16 weight first and then calling `F.linear` (third column of the full tables) is 4 to 6 times slower than bf16 at M = 1, because the weight is read and written several times. At M = 16,384 it is within 3% of bf16, twice as fast as the PR's kernel.
 - **Accuracy.** On random weights, the kernel's own error (1.6–1.7 × 10⁻³ relative) equals bf16's rounding error; quantization adds about 8 × 10⁻³, five times that.
 
 ### 3. End to end: no reliable gain
@@ -91,7 +91,7 @@ Decode time per step by batch size:
 - **Decode: −2.16 s, mostly from capacity.** The 17 extra blocks cut preemptions from 34 to 24, more sequences decode together (31.1 per step on average instead of 25.7), and the same tokens take 17% fewer steps. Small-batch steps are faster, as the kernel test predicts; large-batch steps are slower. A decode step with 30–60 sequences mostly reads K/V, which int8 does not shrink, and with 180 blocks more context is in flight per step. I have not verified that last point.
 - **Prefill: +1.49 s.** Each prefill token costs 44% more (85.3 against 122.8 µs).
 
-The `bench.py` script itself, run once per configuration, gave 45.38 s (main), 46.19 s (PR bf16) and 45.54 s (PR int8) ([results/bench_py_*.json](results/)).
+The `bench.py` script itself, run once per configuration, gave 45.38 s (main), 46.19 s (PR bf16) and 45.54 s (PR int8) ([results/bench_py_*.json](results/), run by hand, not by run.sh).
 
 ### 4. Why prefill got slower: two large steps
 
@@ -106,7 +106,7 @@ All 64 requests arrive together, so the first two steps fill the 16,384-token bu
 
 ### 5. What the kernel compiles to
 
-From [results/gpu_facts.txt](results/gpu_facts.txt). The GPU has 24 SMs, 65,536 registers and about 99 KB of shared memory per SM, and a 32 MiB L2; memory bandwidth is 256 GB/s in theory and about 196 GB/s measured with a 512 MiB copy.
+From [results/gpu_facts.txt](results/gpu_facts.txt). The GPU has 24 SMs, 65,536 registers and about 100 KB of shared memory per SM (one block can use at most 99 KB), and a 32 MiB L2; memory bandwidth is 256 GB/s in theory and about 196 GB/s measured with a 512 MiB copy.
 
 | Tile configuration | Threads per program | Registers per thread | Shared memory per program | Programs per SM at once |
 |---|---|---|---|---|
@@ -119,7 +119,7 @@ The PTX shows the expected instructions: `cp.async` copies tiles from global to 
 
 On this laptop, PR #281 saves 413 MiB of weights and turns them into 17 more KV blocks, but it does not make this workload measurably faster: 43.30 s against 43.98 s, within run-to-run noise. Decode gains 2.2 s, mostly because more KV blocks mean fewer preemptions and larger batches, not because each step is faster; prefill loses 1.5 s in two 16k-token steps, where the kernel takes twice as long as cuBLAS. The +7.3% reported on an RTX 4070 Laptop GPU is plausible there because that GPU was more memory-starved (98 blocks growing to 115, +17%, against 163 to 180, +10% here), so the capacity effect is larger.
 
-Using the kernel only where it wins would change the result. If the steps above 4096 tokens rebuilt the bf16 weight and used cuBLAS, which is within 3% of bf16 at that size, the int8 prefill would cost about 2.56 s of linear-layer time instead of 4.43 s, and the total would drop to roughly 41.4 s, about 6% faster than main. That is an estimate, not a measurement: the temporary bf16 weight would also raise the warmup's peak memory and could cost a block or two.
+Using the kernel only where it wins would change the result. If the steps above 4096 tokens rebuilt the bf16 weight and used cuBLAS, which is within 3% of bf16 at that size, the int8 prefill would cost about 2.7 s of linear-layer time instead of 4.43 s (the smaller steps stay on the int8 kernel), and the total would drop to roughly 41.6 s, about 5.5% faster than main. That is an estimate, not a measurement: the temporary bf16 weight would also raise the warmup's peak memory and could cost a block or two.
 
 ## Caveats
 
@@ -136,4 +136,4 @@ git -C nano-vllm worktree add ../pr-281 pr-281
 NANO_VLLM_MAIN=/path/to/nano-vllm NANO_VLLM_PR=/path/to/pr-281 PYTHON=/path/to/python bash run.sh
 ```
 
-`NANO_VLLM_MAIN` is a checkout at `bb823b3`. [run.sh](run.sh) writes everything in `results/`; the nine end-to-end runs take about 12 minutes.
+`NANO_VLLM_MAIN` is a checkout at `bb823b3`. [run.sh](run.sh) writes everything in `results/` except `bench_py_*.json`; the nine end-to-end runs take about 12 minutes.

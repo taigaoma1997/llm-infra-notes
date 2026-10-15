@@ -24,7 +24,7 @@ Keeping the KV cache on one GPU and fetching it when needed does not work well: 
 
 ### 2. Processes in nano-vllm
 
-With `tensor_parallel_size=2`, [`LLMEngine`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py#L25-L27) starts one child process for GPU 1 and keeps GPU 0 for itself. Each process has its own model runner, its half of the weights, and its part of the KV cache. The scheduler, the block manager and the tokenizer exist only once, in the main process.
+With `tensor_parallel_size=2`, [`LLMEngine`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py#L25-L28) starts one child process for GPU 1 and keeps GPU 0 for itself. Each process has its own model runner, its half of the weights, and its part of the KV cache. The scheduler, the block manager and the tokenizer exist only once, in the main process.
 
 Every step, GPU 0's model runner writes the method name and the batch of `Sequence` objects into shared memory and wakes the others ([`write_shm`, `call`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L76-L89)); the others wait in [`loop`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L61-L66) and run the same method. Both build the same tensors from the same sequences, run their half of the model, and only GPU 0 samples. To keep the message small, a sequence in decode sends only its last token ([`Sequence.__getstate__`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py#L72-L74)).
 

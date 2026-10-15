@@ -2,7 +2,7 @@
 
 > Upstream: [sgl-project/mini-sglang](https://github.com/sgl-project/mini-sglang) · Commit I read: [`9a91cfa`](https://github.com/sgl-project/mini-sglang/commit/9a91cfafe754aa85daee49998176275667eb58f2) · Status: in progress (started 2026-10-05)
 
-A compact version of SGLang, about 5,000 lines of Python. It keeps SGLang's main ideas: a radix-tree prefix cache, chunked prefill, overlap scheduling, CUDA Graph for decode, and tensor parallelism. I read it after [nano-vllm](../nano-vllm/), so my notes compare the two.
+A compact version of SGLang, about 5,000 lines of Python by its authors' count (8,090 lines in `python/minisgl/` with comments and blank lines). It keeps SGLang's main ideas: a radix-tree prefix cache, chunked prefill, overlap scheduling, CUDA Graph for decode, and tensor parallelism. I read it after [nano-vllm](../nano-vllm/), so my notes compare the two.
 
 ## How I run it
 

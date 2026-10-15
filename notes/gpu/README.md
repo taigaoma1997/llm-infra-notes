@@ -1,6 +1,6 @@
 # GPU programming
 
-> Status: started (Q&A pages)
+> Status: started (the basics: Q&A pages and online lectures)
 
 Some basics already came up while reading nano-vllm: what a kernel is, grids, blocks and threads, a naive and a tiled matmul, Triton versus CUDA, the kernels `torch.compile` generates, and how to read the kernels inside a recorded CUDA graph. They are in my Chinese Q&A page [QA-cuda-graph.md](../nano-vllm/QA-cuda-graph.md), section 5.
 
@@ -12,7 +12,7 @@ The questions I asked while learning the basics, with answers. They started from
 |---|---|---|
 | GPU hardware | [QA-gpu.md](QA-gpu.md) | SMs, L2 and memory; what is inside an SM (warp schedulers, CUDA cores, Tensor Cores, registers, shared memory); threads, warps, blocks and how many blocks fit on an SM; the memory hierarchy; the rules for writing a kernel that follow from the hardware; when a kernel is limited by memory bandwidth or by compute; this GPU's numbers, including a measured copy bandwidth of about 196 GB/s |
 | Triton | [QA-triton.md](QA-triton.md) | What Triton is and how it compiles; the vector-add example; the common operations (`program_id`, `arange`, pointers, `load` with masks, `dot`, `constexpr`) and the launch syntax; what PR #281's kernel compiles to (`cp.async`, `ldmatrix`, `mma.sync` on Tensor Cores) with its registers and shared memory; how many programs fit on an SM, and how that explains the kernel's speed |
-| Courses | [QA-courses.md](QA-courses.md) | Well-known online lectures on GPUs, kernels and Triton: why each one, which lectures to watch, and in what order (the list below) |
+| Courses | [QA-courses.md](QA-courses.md) | Well-known online lectures on GPUs, kernels and Triton: why each one, which lectures to watch, and in what order |
 
 ## Plan
 
@@ -30,7 +30,7 @@ The questions I asked while learning the basics, with answers. They started from
 
 ## Resources
 
-Lectures, in the order I plan to watch them. Why each one, in Chinese: [QA-courses.md](QA-courses.md).
+Lectures, in the order I picked. Why each one, in Chinese: [QA-courses.md](QA-courses.md).
 
 1. Stanford [CS336](http://cs336.stanford.edu/spring2025/) (Spring 2025, [videos](https://www.youtube.com/playlist?list=PLoROMvodv4rOY23Y0BoGoBGgQ1zmU_MT_)): lecture 5 (GPUs) and lecture 6 (kernels, Triton). Later: 7 and 8 (parallelism), 10 (inference).
 2. [GPU MODE lectures](https://github.com/gpu-mode/lectures) ([YouTube](https://www.youtube.com/@GPUMODE)): 4 (compute and memory architecture) and 14 (Triton) first, then Triton-Puzzles (step 2 of the plan).

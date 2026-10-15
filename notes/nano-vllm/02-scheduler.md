@@ -69,7 +69,7 @@ A detail I found while testing: the limit of 512 applies per step, not to the ru
 
 ### 4. Preemption
 
-When a sequence needs a block and none is free ([L60-L64](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L60-L64)):
+When a sequence needs a block and none is free ([L60-L65](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L60-L65)):
 
 - The scheduler preempts the tail of the running queue: the most recently admitted sequence. If the sequence that needs the block is the only one left, it preempts that one.
 - [`preempt`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L75-L79) sets it back to `WAITING`, returns its blocks, and puts it at the **front** of the waiting queue. Its K/V is gone, but its tokens, including the ones it generated, are kept.

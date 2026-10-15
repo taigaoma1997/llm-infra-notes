@@ -1,7 +1,7 @@
 # [nano-vllm #190] CUDA graph replay fails once a sequence grows past max_model_len
 
 - Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/190 · Same bug, reported earlier: [#106](https://github.com/GeeeekExplorer/nano-vllm/issues/106) · Open PRs: [#270](https://github.com/GeeeekExplorer/nano-vllm/pull/270) (fixes the root cause; it did not link this issue, so I [commented there](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) with the reproduction, and its author then added `Fixes #190`) and [#191](https://github.com/GeeeekExplorer/nano-vllm/pull/191) (avoids the crash) · Closed without merging: [#258](https://github.com/GeeeekExplorer/nano-vllm/pull/258), [#263](https://github.com/GeeeekExplorer/nano-vllm/pull/263)
-- Status: studied. Reproduced on unmodified upstream, found why nothing catches it earlier, and tested the two open PRs with the same script. No PR from me: #270 already fixes the root cause, so I posted the reproduction on it instead (2026-10-08). Its author then added `Fixes #190` to the PR (2026-10-09).
+- Status: root cause found, open PRs tested. Reproduced on unmodified upstream, found why nothing catches it earlier, and tested the two open PRs with the same script. No PR from me: #270 already fixes the root cause, so I posted the reproduction on it instead (2026-10-08). Its author then added `Fixes #190` to the PR (2026-10-09).
 - Commit read: `bb823b3`, unmodified upstream; the PRs at their heads, #270 `b8996b2` and #191 `b386ae2`
 - Written: 2026-10-03 · Updated: 2026-10-09
 - Study Q&A (Chinese), with every question I asked along the way: [QA-cuda-graph.md](../QA-cuda-graph.md)

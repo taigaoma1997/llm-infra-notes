@@ -1,5 +1,7 @@
 # Fundamentals
 
+> Status: in progress
+
 ## Notes
 
 | # | Question | Status |

@@ -1,7 +1,7 @@
 # [nano-vllm #219] Identical prefixes prefilled in the same step get separate blocks, and #208
 
 - Upstream issue: https://github.com/GeeeekExplorer/nano-vllm/issues/219 · The other side of the same change: [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) (closed by its reporter) · The change: [#218](https://github.com/GeeeekExplorer/nano-vllm/pull/218) (merged) · Open PR: [#243](https://github.com/GeeeekExplorer/nano-vllm/pull/243)
-- Status: studied. Reproduced both sides with a scheduler simulation and on the real engine. #208 does not give wrong results in nano-vllm; #219 is a real cost. No PR from me: the open PR #243 already removes the duplicate blocks, and in my tests the outputs stay the same.
+- Status: root cause found, open PR tested. Reproduced both sides with a scheduler simulation and on the real engine. #208 does not give wrong results in nano-vllm; #219 is a real cost. No PR from me: the open PR #243 already removes the duplicate blocks, and in my tests the outputs stay the same.
 - Commit tested: `bb823b3` (current upstream), `f64d821~1` (`44a51af`, the code before #218), and PR #243 (`1704c07`, based on `bb823b3`)
 - Written: 2026-10-10 · Updated: 2026-10-11
 - Study Q&A (Chinese), with every question I asked along the way: [QA-scheduling.md](../QA-scheduling.md)

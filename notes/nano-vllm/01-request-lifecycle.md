@@ -168,5 +168,5 @@ Illustrative timing in ms, not a measurement: CPU work ("prep" = schedule and bu
 
 ## References
 
-- [QA-scheduling](QA-scheduling.md) (in Chinese): parts 1 and 2 walk through one run of the scheduler
+- [QA-scheduling](QA-scheduling.md) (in Chinese): part 1 walks through one run of the scheduler, and part 2 defines the terms
 - [Experiment 001](../../experiments/001-preemption-1000-requests/)

@@ -5,7 +5,7 @@
 - Commit tested: `<commit>`
 - Written: {{DATE}}
 
-<!-- Also add a row to CONTRIBUTIONS.md and to the Contributions table in README.md, and keep its status in sync with this page. -->
+<!-- Also add a row to CONTRIBUTIONS.md, to the Contributions table in README.md, and to the project's issues/README.md, and keep its status in sync with this page. -->
 
 ## TL;DR
 

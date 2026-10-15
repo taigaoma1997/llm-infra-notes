@@ -13,7 +13,7 @@
 - It saves 413 MiB of weights on Qwen3-0.6B, and nano-vllm turns that memory into 17 more KV blocks (163 to 180). The description's "~1.5 GB to ~0.75 GB" does not match: the linear weights are 840 MiB in bf16.
 - On the PR's own benchmark it is not measurably faster on my RTX 4060 Laptop GPU: 43.30 s against 43.98 s for main, within run-to-run noise. The description reports +7.3% on an RTX 4070 Laptop GPU.
 - Splitting the time explains why. Decode gets 2.2 s faster, mostly because the extra blocks mean fewer preemptions and larger batches; each decode step is only faster at small batch sizes. Prefill gets 1.5 s slower, almost all of it in two 16k-token steps, where the kernel takes twice as long as cuBLAS.
-- Two kernel changes would likely make it pay off: hand large prefill steps to cuBLAS after rebuilding the bf16 weight (estimated ~6% faster than main on this benchmark), and give the narrow layers (o_proj, down_proj) more parallelism at small batch sizes. Neither is tested.
+- Two kernel changes would likely make it pay off: hand large prefill steps to cuBLAS after rebuilding the bf16 weight (estimated about 5.5% faster than main on this benchmark), and give the narrow layers (o_proj, down_proj) more parallelism at small batch sizes. Neither is tested.
 
 ## What I learned
 
@@ -43,7 +43,7 @@ Greedy decoding (sampling replaced by argmax) of a 600-token prompt, 64 tokens:
 - main and the PR without quantization: identical tokens.
 - The PR with int8: the first 44 tokens are identical; token 45 is a different number ("is 42" instead of "is 395"), and the rest follows from it.
 
-Quantization shifts the logits slightly, and greedy decoding flips at the first near-tie. The same prompt drifted after 13 or 22 tokens in [#219](219-same-step-prefix-sharing.md#side-finding-why-two-correct-runs-drift-apart) from nothing more than a different attention kernel in bf16, so the divergence point says little about accuracy. On random weights, the kernel's own error (1.7 × 10⁻³ relative) equals bf16's rounding error, and quantization adds about 8 × 10⁻³.
+Quantization shifts the logits slightly, and greedy decoding flips at the first near-tie. The same prompt drifted at token 13 or 22 in [#219](219-same-step-prefix-sharing.md#side-finding-why-two-correct-runs-drift-apart) from nothing more than a different attention path or a different number of tokens in the prefill step, in bf16, so the divergence point says little about accuracy. On random weights, the kernel's own error (1.7 × 10⁻³ relative) equals bf16's rounding error, and quantization adds about 8 × 10⁻³.
 
 ### Memory
 
@@ -72,7 +72,7 @@ The four linear layers of all 28 layers, one step:
 
 - **Decode (M ≤ 64)**: qkv and gate_up are 1.4–1.85× faster; o_proj and down_proj (N = 1024) are not faster at all and reach only about 50 GB/s against cuBLAS's 100. With 64-column tiles, N = 1024 gives 16 thread blocks for 24 SMs, and each walks the whole K dimension (2048 or 3072) alone.
 - **Prefill (M ≥ 1024)**: slower, twice as slow at M = 16,384, where cuBLAS keeps 16–18 TFLOPS and the kernel drops to 7–9.
-- Rebuilding the bf16 weight and calling `F.linear` instead is 4× slower than bf16 at M = 1 but within 3% of it at M = 16,384, so it beats the PR's kernel there.
+- Rebuilding the bf16 weight and calling `F.linear` instead is 4 to 6 times slower than bf16 at M = 1 but within 3% of it at M = 16,384, so it beats the PR's kernel there.
 
 ### End to end
 
@@ -107,7 +107,7 @@ Each could be its own small PR; the maintainer tends to merge small, focused cha
 
 ## Ideas that could make it pay off (not tested)
 
-- **Hand large M to cuBLAS.** Above about 4096 tokens, rebuild the bf16 weight from int8 and the scales and call `F.linear`. In this workload only the two large prefill steps would take that path, and the estimate is about 41.4 s, 6% faster than main. The temporary bf16 weight (12 MiB for gate_up, more if it goes through fp32) would also raise the warmup's measured peak and could cost a block or two.
+- **Hand large M to cuBLAS.** Above about 4096 tokens, rebuild the bf16 weight from int8 and the scales and call `F.linear`. In this workload only the two large prefill steps would take that path, and the estimate is about 41.6 s, 5.5% faster than main. The temporary bf16 weight (12 MiB for gate_up, more if it goes through fp32) would also raise the warmup's measured peak and could cost a block or two.
 - **More thread blocks for narrow layers at small M.** Smaller column tiles or a split-K reduction for o_proj and down_proj, so that 16 thread blocks no longer leave a third of the SMs idle.
 - **Grouped tile order for large M**, as in Triton's matmul tutorial, so neighbouring thread blocks reuse the same input tiles from L2.
 
@@ -115,11 +115,11 @@ Each could be its own small PR; the maintainer tends to merge small, focused cha
 
 - A quantization result depends on the workload mix. W8A16 speeds up memory-bound decode and does nothing for compute-bound prefill, so the same PR can win with short prompts and long answers and lose with long prompts and short answers.
 - Some of the gain from quantization is capacity, not speed: smaller weights leave room for more KV blocks, and on a GPU that is short of KV cache, that matters more than the kernel.
-- Step counts are as informative as times. Because scheduling depends only on token counts, the three bf16 runs made exactly the same 1518 steps, which isolated the timing noise, and a scheduler-only replay reproduced every step.
+- Step counts are as informative as times. Because scheduling depends only on token counts, the six bf16 runs (main and the PR) made exactly the same 1518 steps, which isolated the timing noise, and a scheduler-only replay reproduced every step.
 - Two traps in benchmarking this: the PR's `bench.py --compare` starts subprocesses, which in my setup imported a different nano-vllm checkout (where `quantization="int8"` is silently ignored); and a single run per configuration cannot separate a 1–2% effect from noise.
 
 ## Open questions
 
-- The bf16 decode kernels reach only 100–130 GB/s. What does a plain copy reach on this GPU, and how far is that from its specification?
+- Why do the bf16 decode kernels (cuBLAS, M ≤ 64) reach only 100–140 GB/s, when a plain copy reaches about 196 GB/s (256 in theory; [experiment 002](../../../experiments/002-int8-weight-only-pr281/#5-what-the-kernel-compiles-to))?
 - How large is the quantization error on the real model, measured per position with teacher forcing rather than by where greedy output diverges?
 - Are large-batch int8 decode steps slower because more K/V is in flight? Comparing steps with the same total context length would tell.

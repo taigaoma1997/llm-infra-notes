@@ -52,7 +52,7 @@ Summary: 1030 steps (56 prefill, 974 decode), 569 preemptions, 840,950 prefill t
 
 ([2048 output](results/output_2048.txt), [4096 output](results/output_4096.txt))
 
-With 2048 blocks there are still 488 preemptions. All 1000 sequences get in (32 prefill steps, 2 blocks each), but a decode step serves only the first 512 of `running`, so the other 488 hold their blocks without generating anything. At step 45 the first 512 cross into their third block, and the sequences preempted to make room are exactly those 488 idle ones, at the tail of `running`. They come back after the first group finishes and recompute their prompts: 244,488 extra prefill tokens.
+With 2048 blocks there are still 488 preemptions. All 1000 sequences get in (32 prefill steps, 2 blocks each), but a decode step serves only the first 512 of `running`, so the other 488 hold their blocks without generating anything. At step 45 the first 512 cross into their third block and 232 idle sequences are preempted to make room; at step 301, for the fourth block, the other 256 are. All 488 preempted sequences are the idle ones at the tail of `running`. They come back after the first group finishes and recompute their prompts: 244,488 extra prefill tokens.
 
 With 4096 blocks nothing is preempted, and the run is the shortest. It still takes two rounds of 299 decode steps, because only 512 sequences decode at a time.
 

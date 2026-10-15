@@ -6,7 +6,7 @@ A small, readable engine that keeps the core ideas of vLLM: continuous batching,
 
 ## How I ran it
 
-Windows 11, NVIDIA GeForce RTX 4060 Laptop GPU (8 GB), driver 566.24. Conda environment `learn-vllm`: Python 3.10.21, torch 2.6.0+cu124 (CUDA 12.4), triton-windows 3.2.0, flash-attn 2.8.3, transformers 5.16.1.
+Windows 11, NVIDIA GeForce RTX 4060 Laptop GPU (8 GB), driver 617.14. Conda environment `learn-vllm`: Python 3.10.21, torch 2.6.0+cu124 (CUDA 12.4), triton-windows 3.2.0, flash-attn 2.8.3, transformers 5.16.1.
 
 ```powershell
 git clone https://github.com/GeeeekExplorer/nano-vllm; cd nano-vllm
@@ -82,7 +82,7 @@ flowchart LR
 
 ## Issues I reproduced
 
-Write-ups live in [issues/](issues/). The status of each one is tracked in [CONTRIBUTIONS.md](../../CONTRIBUTIONS.md).
+Write-ups live in [issues/](issues/). The status of each issue and PR I took part in upstream is tracked in [CONTRIBUTIONS.md](../../CONTRIBUTIONS.md); PR #281 is a local test only, so it is listed only in issues/.
 
 ## A pattern across these issues
 

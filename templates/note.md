@@ -1,4 +1,4 @@
-# {{TITLE}}
+# {{NUMBER}} · {{TITLE}}
 
 > Project: {{PROJECT}} @ `<commit>` · Written: {{DATE}} · Status: draft
 
