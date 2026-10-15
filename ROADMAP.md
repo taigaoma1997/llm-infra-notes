@@ -29,6 +29,7 @@ Done when one PR is merged.
 
 ## Phase 3 · GPU programming (Dec 2026 to Jan 2027)
 
+- [ ] Lectures: CS336 5 and 6, GPU MODE 4 and 14 (full list in [notes/gpu](notes/gpu/README.md#resources))
 - [ ] GPU-Puzzles and Triton-Puzzles
 - [ ] Triton softmax and matmul, with an Nsight Compute analysis of each
 - [ ] Triton FlashAttention-2 forward pass
