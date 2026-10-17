@@ -6,6 +6,8 @@ Issues I reproduced, PRs I opened, and upstream discussions I took part in. Newe
 
 | Date | Project | Upstream | Type | Status | Write-up |
 |---|---|---|---|---|---|
+| 2026-10-17 | mini-sglang | [PR #142](https://github.com/sgl-project/mini-sglang/pull/142#issuecomment-6239502457), [PR #154](https://github.com/sgl-project/mini-sglang/pull/154#issuecomment-6239519480) | PR comment | posted: linked each PR to the #168 reproduction | [notes](notes/mini-sglang/issues/168-radix-dedup-stale-page-table.md) |
+| 2026-10-17 | mini-sglang | [#168](https://github.com/sgl-project/mini-sglang/issues/168) | reported issue | root cause found, open PRs tested: #142 and #154 both fix it | [notes](notes/mini-sglang/issues/168-radix-dedup-stale-page-table.md) |
 | 2026-10-10 | nano-vllm | [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) with [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) | reproduced issue | root cause found, open PR tested | [notes](notes/nano-vllm/issues/219-same-step-prefix-sharing.md) |
 | 2026-10-08 | nano-vllm | [PR #270](https://github.com/GeeeekExplorer/nano-vllm/pull/270#issuecomment-6064191717) | PR comment | posted: the #190 reproduction; the author then added `Fixes #190` | [notes](notes/nano-vllm/issues/190-cuda-graph-block-tables.md#fixes-compared-the-open-prs-tested) |
 | 2026-10-06 | triton-windows | [PR #56](https://github.com/triton-lang/triton-windows/pull/56) | docs PR | merged | [notes](notes/triton-windows/issues/56-pytorch-2.6-os-replace.md) |
