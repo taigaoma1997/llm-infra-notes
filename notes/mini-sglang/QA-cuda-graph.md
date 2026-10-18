@@ -125,7 +125,7 @@ return [1, 2, 4] + list(range(8, cuda_graph_max_bs + 1, 8))
 
 PR 版第一次跑，录 2 个 graph 用了 15 秒（7.80 s/batch），原版录 3 个只要 1 秒多。PR 版再跑一次，只用了 1.4 秒。
 
-mini-sglang 自己的几个 kernel（`index`、`store`）是第一次用到时现场编译的，编译结果放在 `~/.cache/tvm-ffi/`，目录名后面带一个 hash。那 15 秒里正好新出现了两个目录：12:30:59 的 `minisgl__index_…` 和 12:31:07 的 `minisgl__store_…`。同一个 kernel 在缓存里有好几份不同的 hash，数量和我用过的代码目录（upstream、learning、dev、测 PR 用的几个）对得上，看起来每个代码目录都要编译一次（hash 是怎么算的没查）。
+mini-sglang 自己的几个 kernel（`index`、`store`）是第一次用到时现场编译的，编译结果放在 `~/.cache/tvm-ffi/`，目录名后面带一个 hash。那 15 秒里正好新出现了两个目录：12:30:59 的 `minisgl__index_…` 和 12:31:07 的 `minisgl__store_…`。同一个 kernel 在缓存里有好几份不同的 hash：到 10-18 晚上，`index` 一共 6 份，正好对上我跑过的 6 个代码目录（upstream、learning，和测 PR 用的 pr-142、pr-154、pr-160、pr-111），时间也对得上。当天下午第一次在 pr-111 里跑，录 graph 也用了 15 秒。看起来每个代码目录都要编译一次（hash 是怎么算的没查）。
 
 所以比较两个版本的速度时，每个版本都要先热身跑一次。第一次起 server 时的 55 秒也是这个原因（[QA-processes](QA-processes.md)，启动日志那一节）。
 

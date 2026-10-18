@@ -13,8 +13,9 @@
 7. 这个 bug 是怎么来的：mini-sglang 的来历，以及 SGLang 是怎么写的
 8. 读 `overlap_loop` 的代码：差在哪、CPU 在等谁、多张卡怎么等（2026-10-15）
 9. 复现 A1：从账本错到算错（#168，2026-10-17）
-10. 自测：做过的题和纠正
-11. 下一步要想的问题
+10. abort 撞上还没处理的那一步：同一个请求被收尾两次（#170，2026-10-18）
+11. 自测：做过的题和纠正
+12. 下一步要想的问题
 
 ---
 
@@ -81,7 +82,7 @@ GPU 上的队列按顺序执行：先写 `token_pool`，再读 `token_pool`，�
 
 ## 代价：调度器手里的信息晚一步
 
-1. **结束要晚一步才知道。** 第 k−1 步生成了 EOS，可第 k 步在 CPU 知道之前就发出去了，这个请求还在里面。`_process_last_data` 里的 `finished_reqs`（[L159](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/scheduler.py#L159)）就是防止同一个请求被释放两次的。
+1. **结束要晚一步才知道。** 第 k−1 步生成了 EOS，可第 k 步在 CPU 知道之前就发出去了，这个请求还在里面。`_process_last_data` 里的 `finished_reqs`（[L159](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/scheduler.py#L159)）就是防止同一个请求被释放两次的。但它只防得住 `_process_last_data` 自己连着两圈释放；abort 在中间插进来的那种防不住，见第 10 节（#170）。
 2. **插进 radix 树也晚一步。** 下一节专门讲。
 3. **正确性更难保证。** 资源可能在 GPU 还在用时被 CPU 释放或改写。`ForwardInput` 把正在跑的那一步的张量留着（[L34](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/scheduler.py#L34) 的注释 "to avoid IMA"，IMA 是 illegal memory access）。[PR #103](https://github.com/sgl-project/mini-sglang/pull/103) 修的就是这类时间差：FlashInfer 的 plan 复用了一块 pinned 内存，上一次的异步拷贝还没完成就被改写了。
 
@@ -426,6 +427,91 @@ self._free(dup_indices)                                     # 还的是拷贝：
 
 ---
 
+## abort 撞上还没处理的那一步：同一个请求被收尾两次（#170）
+
+**来由**：做 [PR #111](https://github.com/sgl-project/mini-sglang/pull/111) 的读代码练习（标题："overlap 下，请求在结束的那一步被 abort，会被释放两次"）时追问了一句"是不是一定要 EOS"，结果找到一条 #111 没写的路径，崩溃的位置正好是 backlog A3 那个没人开过 issue 的断言。开成了 [#170](https://github.com/sgl-project/mini-sglang/issues/170)。英文 write-up：[issues/170](issues/170-abort-in-flight-double-release.md)。
+
+### 10.1 一句话
+
+**X 的"收尾"被做了两次，两条路互相不知道**：一次是 ① 里处理 abort，一次是 ③ 里处理"X 所在的那一步"的结果。overlap 下，② 发出的一步要到下一圈的 ③ 才处理，中间隔着下一圈的 ①，abort 就是从这里插进来的。
+
+### 10.2 收尾函数 `cache_req` 的四小步
+
+[cache.py L55-L79](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/cache.py#L55-L79)，大白话：
+
+```
+1. 把 X 的前 cached_len 个 token 插进树         → 树告诉你"这里面本来就有多少"（prefix_len）
+2. unlock(X.cache_handle)                       → 还掉进场时锁的那个节点
+3. 释放 [进场时命中的长度, prefix_len)            → "进场时树里没有、现在有了"，说明别人插过，X 这份是重复的
+4. finished=True：还掉尾巴，X.cache_handle 不变
+   finished=False：X.cache_handle = 新节点，lock(新节点)
+```
+
+做两次时，**第 2 小步和第 3 小步会出事**。打个比方：进场时借了一本书（`lock`），收尾时还书（`unlock`）；借一次、还两次，借出数就变成 −1。
+
+### 10.3 hit：按 run loop 一圈圈走
+
+先让 A 用同一个 prompt（101 个 token）跑完：树里 116 格（prompt 加 15 个生成的 token），没人锁，空闲 46892 格。
+
+| 圈 | 步 | 代码 | 改了什么 |
+|---|---|---|---|
+| 1 | ② 进场 | `_try_allocate_one`（[prefill.py L39-L61](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/prefill.py#L39-L61)）：命中前 100 个 token（只看 `input_len − 1`），节点 N；`lock(N)` | **N.ref_count = 1**，**`X.cache_handle = N`**；给第 101 个 token 分 1 格 |
+| 1 | ② 发出 | `complete_one`（engine.py L200）在**发出时**就改长度；`filter_reqs` 把 X 加进 decode 名单 | `X.cached_len = 101`；X 在 `running_reqs` 里 |
+| 2 | ① abort | `decode_manager.abort_req` 找到 X → `_free_req_resources` → **`cache_req(X, finished=True)`**：101 个都在树里，X 那 1 格算重复、还掉；`unlock(N)` | **N.ref_count = 0**；`X.cache_handle` **还是 N**（第 4 小步 finished=True 不改它） |
+| 2 | ② | 没人可调度 | |
+| 2 | ③ | 处理圈 1 的 prefill：不算结束 → `elif batch.is_prefill` → **`cache_req(X, finished=False)`**（L163-L164）→ 又 `unlock(N)` | **N.ref_count = −1 → 断言失败，scheduler 崩溃** |
+
+traceback：scheduler.py 131 → 105 → **164** → cache.py 72 → 40 → radix_cache.py 119。A3 报告里那条一模一样，行号都一样。
+
+### 10.4 miss：同样两次收尾，坏在第 3 小步
+
+树是空的。X 什么都没命中，`X.cache_handle` 是**根节点**，根节点 `lock`/`unlock` 都什么也不做。
+
+| 时刻 | 发生了什么 | 树 | 空闲 |
+|---|---|---|---|
+| 圈 1 ② | 分 101 格，发出 prefill | 0 | 46907 |
+| 圈 2 ① | abort → `cache_req(finished=True)`：插树，**新建节点 M**（101 格，没人锁）；`unlock(根)` 无事；没有重复要还。**这时账还是对的**：101 + 46907 = 47008 | 101 | 46907 |
+| 圈 2 ③ | `cache_req(finished=False)`：再插一次，树说"101 个本来就有"。第 3 小步以为"一定是别人插的，X 这份是重复的"，把 `[0, 101)` 还掉。**其实那个"别人"就是 X 自己在 ① 插的**。最后 `lock(M)` | 101（protected） | **47008** |
+
+后果：这 101 格同时在树里和空闲列表里（分给别人就被覆盖，之后命中 M 的请求读到错的 KV，和 #168 一类）；M 永远锁着。按代码推，server 下一次空闲时 `check_integrity()` 会抛错（`run_when_idle`，scheduler.py L78-L80），没在 server 上跑过。
+
+### 10.5 EOS：#111 说的那种
+
+abort 到的时候，CPU 还不知道这一步会出 EOS，X 还在 decode 名单里，被 abort 释放。③ 看到 EOS，`finished=True`；那句防"释放两次"的 NOTE 查的是 `finished_reqs`，可它只记"**上一圈 ③ 自己**释放的"，abort 那条路从不往里写，所以又调一次 `_free_req_resources`（L161）：行还两次，handle 也解锁两次（这时的 handle 是 prefill 收尾后锁上的那个真节点），**一样撞断言**，只是入口是 L161 不是 L164。#111 的测试全是 mock，看不到这一步；真模型上实测确实崩。
+
+### 10.6 为什么做 hit 和 miss 两个实验？只有命中才触发吗？
+
+不是。两种情况 bug 都发生了（都收尾两次），区别只是哪一小步出事：
+
+| | 第 2 小步：`unlock` 两次 | 第 3 小步："还重复"两次 |
+|---|---|---|
+| hit（handle 是真节点） | ref_count 变 −1，**当场崩** | 走不到 |
+| miss（handle 是根节点） | 根节点不计数，**没事** | 把自己刚插进树的格子当重复还掉，**账错，不崩** |
+
+所以两个实验是**同一个 bug 的两种症状**：hit 证明能撞上 A3 那个断言；miss 证明不崩时账也已经错了。
+
+### 10.7 时间窗口有多大（纠正我自己的一个说法）
+
+我一开始说"窗口是整个 prefill 的时间，比 EOS 那条更容易撞上"，**这是错的**。abort 必须被"发出之后的下一次 ①"收下；上一圈的 ③ 只等**前一步**算完、不等 X 这一步，所以下一次 ① 来得很快。窗口大约一个 GPU 步，和 EOS 那条差不多。复现不受影响：脚本正好把 abort 塞在那一次 ①。
+
+### 10.8 #111 怎么修；和 #168 的关系
+
+**#111**：① 收到 abort 时只把 X 从队列里拿出来，放进 `pending_aborts`，**不收尾**；③ 之后再统一收一次尾，还在 GPU 上的跳过，③ 已经释放过的（EOS）也跳过。prefill 时就变成：③ 正常 `cache_req(finished=False)`（解锁 N、锁新节点），之后释放一次（解锁新节点），每次 `lock` 正好配一次 `unlock`。实测 hit、miss、eos 三种都干净。
+
+**#111 修不了 #168，#154 也修不了这个**：pr-111 的 `cache.py` 和原版一字不差；#154 只改第 3 小步，第 2 小步的两次 `unlock` 照旧。两个修复都要。
+
+**往上一层**：这一族 bug 都来自第 4 节说的代价，**CPU 手里的账比 GPU 晚一步**：
+
+| bug | 晚一步的是什么 |
+|---|---|
+| #168 | 前一个请求的 prompt 还没插进树，下一个请求就进场了 |
+| #170 / #111 | 请求已经发给 GPU，abort 在结果处理之前插进来 |
+| 结束晚一步（下一步要想的问题） | EOS 晚一步才知道，多算一步 |
+
+读 SGLang 的 overlap 时带着这个问题：它怎么保证"发出去、还没处理"的那一步不被别的事情打乱？
+
+---
+
 ## 自测：做过的题和纠正
 
 2026-10-08：
@@ -447,6 +533,18 @@ self._free(dup_indices)                                     # 还的是拷贝：
 | 开了 overlap，输出也没错，是不是就没问题？ | 看起来没问题 | ❌ | 账本已经错了，只是格子还没被别人写（9.3） |
 | 把 KV 开小，让 uid0、uid1 自己 decode 时覆盖那些格子，行不行？ | 行 | ❌ | 预留把重复的那份也算进去了，两个请求自己永远轮不到末尾那些格子，要第三个请求（9.4） |
 
+2026-10-18（PR #111 的读代码练习 → #170）：
+
+| 题 | 我的回答 | 结果 | 纠正 |
+|---|---|---|---|
+| X 在第 k 步算出 EOS，abort 在哪一圈到，X 会被释放两次？ | 按 GPU 来算，在同一批的后一个 `_process_one_msg` 里遇到 abort | ✅ | 准确说：abort 要在 GPU 算 X 最后一步时到达，被"处理这一步结果"那一圈开头的 ① 收下（10.5） |
+| 那句 NOTE 已经在防"释放两次"，为什么防不住？ | `_process_one_msg` 里没检查 abort 时 X 是不是已经在释放过的列表里 | ⚠️ 方向反了 | abort 那次在**前**（①），③ 那次在**后**；`finished_reqs` 只记上一圈 ③ 自己释放的，abort 不往里写，所以 ③ 看不见前面那次（10.5） |
+| 是不是一定要 EOS？ | 不一定，只要 abort 了但还一直 decode，就没有改"是否结束"的标志 | ⚠️ 结论对、理由不对 | abort 以后 X 不会再被调度；"结束"不是存着的标志，是 ③ 每次现算的，所以 decode 里确实只有 EOS 会撞上。但如果还没处理的那一步是 **prefill**，不需要 EOS，这就是 #170（10.3） |
+| 为什么做 hit 和 miss 两个实验？ | 怀疑是不是只有命中缓存才会触发 | ❌ | 两种都触发，症状不同：hit 崩在 `unlock` 两次，miss 账错在"还重复"两次（10.6） |
+| 一句话总结 | overlap 下，准备下一批和处理上一批的代码在 corner case 里没有同步，比如收尾做了两次；#111 让两边同步了 | ✅ | 补准：不完全是"格子删两次"，hit 是锁还两次，miss 是把自己刚存进树的格子当成别人的重复还掉 |
+| #111 修了 #154（#168）的问题吗？ | 应该没有 | ✅ | pr-111 的 `cache.py` 和原版一字不差；两个是不同的 bug，都要修（10.8） |
+| issue 标题写 "during its prefill" 够通用吗？ | 不够，EOS 时 abort 也会出这个问题 | ✅ | 改成 "while its step is in flight"，并加了 eos 模式实测：入口是 L161，一样崩 |
+
 ---
 
 ## 下一步要想的问题
@@ -456,4 +554,6 @@ self._free(dup_indices)                                     # 还的是拷贝：
 - 结束晚一步：EOS 之后那一步多算出来的 token 去哪了？同一个请求会不会收到两次"结束"消息？detokenizer 和前端怎么处理？
 - 同一步 prefill（overlap 关）：两个前缀相同的请求在**同一步**里都没命中，后插树的那个会不会也还掉自己那份？成立的话，A1 就不只是 overlap 的问题。改复现脚本，让 uid0、uid1 在同一步进场，试一试。
 - [#149](https://github.com/sgl-project/mini-sglang/issues/149) 的修复 [PR #165](https://github.com/sgl-project/mini-sglang/pull/165) 检查的是 radix 树和空闲列表。A1 错的是 page table，它能抓到吗？
-- 练"读代码看出 bug"：PR #111 的标题是"overlap 下，请求在结束的那一步被 abort，会被释放两次"。先不看 diff，自己读 `_process_last_data` 和处理 abort 的代码，推出 bug 在哪，再看 diff 对答案。
+- ~~练"读代码看出 bug"：PR #111~~ 做了一半（2026-10-18），追问引出了 #170（第 10 节）。剩下的题：abort 早一圈、晚一圈到会怎样？行被还两次以后，两个新请求会怎样？
+- #170 在 HTTP server 上能不能真实触发：只有流式请求会发 abort，而且主进程要在发下一段数据时（或者 Starlette 取消这个响应时）才发现客户端断开，之后还要等 0.1 秒才发，窗口只有大约一个 GPU 步（学在线部分时再做）。
+- 节点 N 同时被别的请求锁着时：两次 `unlock` 不会当场崩，ref_count 少 1，等最后一个持有者解锁时才崩。怎么构造出来？

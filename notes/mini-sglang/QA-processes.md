@@ -168,14 +168,14 @@ decode 一步只出一个 token，所以 detokenizer 收到 82912 时还不能�
 | `self.receive_msg()` | `LLM.offline_receive_msg`（[llm.py L48-L69](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/llm/llm.py#L48-L69)） | 从 prompt 列表里拿请求、发号，同时建好 `status_map[uid]` |
 | `self.send_result(reply)` | `LLM.offline_send_result`（[llm.py L71-L75](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/llm/llm.py#L71-L75)） | 把每个 token 按 uid 追加到 `status_map[uid]`，结束时的 EOS 不加 |
 
-**Dry run**：`llm.generate(["Hi", "apple " * 100, "Bye"], SamplingParams(max_tokens=16))`，`max_seq_len_override=64`。
+**Dry run**（按代码推的，还没跑过）：`llm.generate(["Hi", "apple " * 100, "Bye"], SamplingParams(max_tokens=16))`，`max_seq_len_override=64`。
 
 | 步 | 代码 | 发生了什么 | `status_map` |
 |---|---|---|---|
 | 0 | `generate` L82-L90 | 三个请求放进 `pending_requests`，`status_map` 清空，`counter` 归零，调 `run_forever()` | `{}` |
 | 1 | 第一圈：`receive_msg` = `offline_receive_msg` | 按顺序处理三个 prompt：tokenize，发号 `uid = counter + added`，同时建好 `status_map[uid]`。"Hi" 是 0，apple 是 1，"Bye" 是 2 | `{0: [], 1: [], 2: []}` |
 | 2 | `_process_one_msg` | 0 和 2 进 prefill 队列；**1 太长，打一行 warning 就 `return`**。scheduler 只知道 0 和 2 | 不变 |
-| 3 | 之后每圈：`send_result` = `offline_send_result` | 每个新 token 按 `msg.uid` 追加。回复里只会出现 0 和 2 | `{0: [9707, …], 1: [], 2: […]}` |
+| 3 | 之后每圈：`send_result` = `offline_send_result` | 每个新 token 按 `msg.uid` 追加。回复里只会出现 0 和 2 | `{0: […], 1: [], 2: […]}` |
 | 4 | 0 和 2 都结束后的下一圈 | 手上没活、也没有能调度的请求，`offline_receive_msg` 发现列表空了，抛 `RequestAllFinished`（L49-L50），`generate` 接住（L91-L92） | 不变 |
 | 5 | `generate` L94-L97 | 按 `i` 取 `status_map[i]`：0 是 "Hi" 的回答，**1 是 `""`**，2 是 "Bye" 的回答 | |
 
@@ -214,7 +214,7 @@ decode 一步只出一个 token，所以 detokenizer 收到 82912 时还不能�
 
 ## 下一步要想的问题
 
-- 客户端中途断开时，abort 消息怎么从主进程一路传到 scheduler？scheduler 正在 GPU 上算这个请求时收到 abort 会怎样？（[PR #111](https://github.com/sgl-project/mini-sglang/pull/111) 讨论的就是这个）
+- 客户端中途断开时，abort 消息怎么从主进程一路传到 scheduler？scheduler 正在 GPU 上算这个请求时收到 abort 会怎样？（[PR #111](https://github.com/sgl-project/mini-sglang/pull/111) 讨论的就是这个）后半个问题 2026-10-18 有答案了：同一个请求会被收尾两次，会崩或者把 radix cache 弄乱，见 [QA-overlap](QA-overlap.md) 第 10 节和 [#170](issues/170-abort-in-flight-double-release.md)。前半个（主进程怎么发 abort）留到学在线部分
 - 主进程里 `wait_for_ack` 收到结束消息后，这个请求的状态什么时候删掉？（[PR #151](https://github.com/sgl-project/mini-sglang/pull/151)）
 - 在线时，同一个太长的请求会一直卡住（[PR #157](https://github.com/sgl-project/mini-sglang/pull/157)）：非流式和流式分别卡在哪？客户端断开以后，主进程里给它留的状态能不能删掉？要先看懂主进程里的 async 代码（`wait_for_ack` 和外面套的几层生成器），读第 8 段时再回来做实验
 - 开着 overlap scheduling 时，scheduler 处理上一步的结果之前，下一步已经发出去了。一个请求的"结束"是在哪一步被发现的？会不会对同一个请求发两次结束消息？

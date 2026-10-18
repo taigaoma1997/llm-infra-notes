@@ -6,6 +6,8 @@ Issues I reproduced, PRs I opened, and upstream discussions I took part in. Newe
 
 | Date | Project | Upstream | Type | Status | Write-up |
 |---|---|---|---|---|---|
+| 2026-10-18 | mini-sglang | [PR #111](https://github.com/sgl-project/mini-sglang/pull/111#issuecomment-6256621180) | PR comment | posted: the #170 results for all three cases, and what the PR's description and mocked test miss | [notes](notes/mini-sglang/issues/170-abort-in-flight-double-release.md) |
+| 2026-10-18 | mini-sglang | [#170](https://github.com/sgl-project/mini-sglang/issues/170) | reported issue | found by reading the code for PR #111; reproduced for three cases, one with the same `ref_count` crash and traceback as a report under load in a #89 comment; open PR #111 fixes all three | [notes](notes/mini-sglang/issues/170-abort-in-flight-double-release.md) |
 | 2026-10-17 | mini-sglang | [PR #142](https://github.com/sgl-project/mini-sglang/pull/142#issuecomment-6239502457), [PR #154](https://github.com/sgl-project/mini-sglang/pull/154#issuecomment-6239519480) | PR comment | posted: linked each PR to the #168 reproduction | [notes](notes/mini-sglang/issues/168-radix-dedup-stale-page-table.md) |
 | 2026-10-17 | mini-sglang | [#168](https://github.com/sgl-project/mini-sglang/issues/168) | reported issue | root cause found, open PRs tested: #142 and #154 both fix it | [notes](notes/mini-sglang/issues/168-radix-dedup-stale-page-table.md) |
 | 2026-10-10 | nano-vllm | [#219](https://github.com/GeeeekExplorer/nano-vllm/issues/219) with [#208](https://github.com/GeeeekExplorer/nano-vllm/issues/208) | reproduced issue | root cause found, open PR tested | [notes](notes/nano-vllm/issues/219-same-step-prefix-sharing.md) |
