@@ -13,7 +13,7 @@ From a pass over all 55 open issues and PRs, and the closed ones, on 2026-10-07,
 1. A variant of A1: two requests with the same prefix prefilled in the same step, with overlap scheduling off. If it also gives a wrong answer, #168 is not specific to overlap scheduling.
 2. A2: review PRs #150 and #165 by checking whether each one catches the state #168 leaves behind (a page-table row pointing at free pages).
 3. A5 (#111) as a read-the-code exercise: find the bug from the title before reading the diff.
-4. Two PRs that are quick to test: [PR #157](https://github.com/sgl-project/mini-sglang/pull/157) (a prompt that is too long is dropped with only a log line, so the client waits forever; the PR answers it with an empty, finished reply) and [PR #160](https://github.com/sgl-project/mini-sglang/pull/160) (CUDA graphs are captured for batch sizes above `--cuda-graph-max-bs`).
+4. Two PRs that are quick to test: [PR #157](https://github.com/sgl-project/mini-sglang/pull/157) (a prompt that is too long is dropped with only a log line, so the client waits forever; the PR answers it with an empty, finished reply) and [PR #160](https://github.com/sgl-project/mini-sglang/pull/160) (CUDA graphs are captured for batch sizes above `--cuda-graph-max-bs`). **#160 tested on 2026-10-18**: with a limit of 3, main captures sizes 1, 2 and 4 and the PR captures 1 and 2; its test fails on main and passes on the PR ([QA-cuda-graph](../QA-cuda-graph.md), in Chinese). #157: only the offline path so far.
 5. A4 (#58) together with C1 (#103), then A3 (the `ref_count` assertion).
 
 The other items opened since 2026-10-07 (#156 to #167) are not sorted yet.

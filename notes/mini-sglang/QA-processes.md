@@ -10,8 +10,9 @@
 4. 一个请求怎么在进程之间走
 5. 为什么要把 tokenizer 单独放一个进程
 6. 为什么 tokenizer 能开好几个，detokenizer 只有一个
-7. 自测：做过的题和纠正
-8. 下一步要想的问题
+7. 离线 `llm.generate`：太长的请求被丢掉以后会怎样（PR #157）
+8. 自测：做过的题和纠正
+9. 下一步要想的问题
 
 ---
 
@@ -156,6 +157,42 @@ decode 一步只出一个 token，所以 detokenizer 收到 82912 时还不能�
 
 ---
 
+## 离线 `llm.generate`：太长的请求被丢掉以后会怎样？
+
+来自测 PR [#157](https://github.com/sgl-project/mini-sglang/pull/157)。prompt 不比 `max_seq_len` 短的请求，scheduler 收到后只打一行 warning 就 `return`，不回复（[scheduler.py L177-L183](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/scheduler.py#L177-L183)；进来时的长度检查见 [QA-vs-nano-vllm](QA-vs-nano-vllm.md) 第 3 部分）。离线时会怎样？
+
+**先说清楚：离线时没有别的进程。** `LLM` 就是 scheduler 的子类，`offline_mode` 下，scheduler 收消息和发结果的两个函数直接换成了 `LLM` 自己写的（[io.py L30-L33](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/scheduler/io.py#L30-L33)）：
+
+| scheduler 调的 | 离线时实际是 | 做什么 |
+|---|---|---|
+| `self.receive_msg()` | `LLM.offline_receive_msg`（[llm.py L48-L69](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/llm/llm.py#L48-L69)） | 从 prompt 列表里拿请求、发号，同时建好 `status_map[uid]` |
+| `self.send_result(reply)` | `LLM.offline_send_result`（[llm.py L71-L75](https://github.com/sgl-project/mini-sglang/blob/9a91cfafe754aa85daee49998176275667eb58f2/python/minisgl/llm/llm.py#L71-L75)） | 把每个 token 按 uid 追加到 `status_map[uid]`，结束时的 EOS 不加 |
+
+**Dry run**：`llm.generate(["Hi", "apple " * 100, "Bye"], SamplingParams(max_tokens=16))`，`max_seq_len_override=64`。
+
+| 步 | 代码 | 发生了什么 | `status_map` |
+|---|---|---|---|
+| 0 | `generate` L82-L90 | 三个请求放进 `pending_requests`，`status_map` 清空，`counter` 归零，调 `run_forever()` | `{}` |
+| 1 | 第一圈：`receive_msg` = `offline_receive_msg` | 按顺序处理三个 prompt：tokenize，发号 `uid = counter + added`，同时建好 `status_map[uid]`。"Hi" 是 0，apple 是 1，"Bye" 是 2 | `{0: [], 1: [], 2: []}` |
+| 2 | `_process_one_msg` | 0 和 2 进 prefill 队列；**1 太长，打一行 warning 就 `return`**。scheduler 只知道 0 和 2 | 不变 |
+| 3 | 之后每圈：`send_result` = `offline_send_result` | 每个新 token 按 `msg.uid` 追加。回复里只会出现 0 和 2 | `{0: [9707, …], 1: [], 2: […]}` |
+| 4 | 0 和 2 都结束后的下一圈 | 手上没活、也没有能调度的请求，`offline_receive_msg` 发现列表空了，抛 `RequestAllFinished`（L49-L50），`generate` 接住（L91-L92） | 不变 |
+| 5 | `generate` L94-L97 | 按 `i` 取 `status_map[i]`：0 是 "Hi" 的回答，**1 是 `""`**，2 是 "Bye" 的回答 | |
+
+**为什么不会对不上号**：
+
+1. uid 就是 prompt 在列表里的下标。每次 `generate` 都把 `counter` 归零（L84），再按顺序发号；prompt 太多、一次装不下时，下次接着用 `counter`，还是连续的。
+2. `status_map` 是字典，**发请求的时候**就建好了（第 1 步），不是等第一个结果回来才建。被丢掉的 uid 1 也有位置，只是一直空着。
+3. 结果按 uid 写回（第 3 步），跟回来的先后无关。请求本来就不按顺序结束（短的先完），所以必须这样。
+
+如果 `status_map` 是收到第一个 token 时才建的，第 5 步取 `status_map[1]` 会 `KeyError`；如果结果是按回来的顺序 append 到列表里，后面的结果就会全部错位。
+
+**也不会卡住**：离线的循环不等"每个 uid 都报告结束"，而是"手上没活、也没有新请求了"就停（第 4 步）。
+
+**真正的问题是悄无声息**：调用的人拿到一个 `""`，和"模型第一个 token 就是 EOS"看起来一模一样。PR #157 在离线时也看不出区别：它给被丢掉的请求回一个 EOS 的"结束"消息，而 `offline_send_result` 正好会跳过结束时的 EOS（L74），所以还是 `""`。区别在在线时：原版那个请求会一直卡住，PR 马上返回一个空回复（见下一步要想的问题）。
+
+---
+
 ## 自测：做过的题和纠正
 
 2026-10-07：
@@ -167,10 +204,17 @@ decode 一步只出一个 token，所以 detokenizer 收到 82912 时还不能�
 | 实验：tokenize 每个 token 3.5 µs，decode 每个 token 8 ms，"好像也还行" | | ⚠️ 比法不对 | 要拿"切完一整个 prompt 卡住多久"（28 ms）和"一个 decode 步"（8 ms）比，而且卡住的是所有人 |
 | 为什么 tokenizer 能开好几个，detokenizer 只有一个？ | prompt 长，切起来费时间；decode 每步只出一个 token | ⚠️ 答的是"为什么值得开多个 tokenizer" | 真正的原因是 detokenizer 要为每个请求记状态（被切开的字要等齐了再发），同一个请求必须一直在同一个进程 |
 
+2026-10-18：
+
+| 题 | 我的回答 | 结果 | 当时的误区 / 纠正 |
+|---|---|---|---|
+| 离线时太长的 prompt 被丢掉，会怎样？ | 被丢掉的请求就没了，程序能正常跑完；但 `generate` 最后按 `status_map[i]` 取结果时，会不会对不上号？ | ⚠️ 前半对，后半不会发生 | uid 就是 prompt 的下标，`status_map[uid]` 在发请求时就建好了，结果按 uid 写回，不按回来的顺序。被丢掉的那个只是一直空着，返回 `""` |
+
 ---
 
 ## 下一步要想的问题
 
 - 客户端中途断开时，abort 消息怎么从主进程一路传到 scheduler？scheduler 正在 GPU 上算这个请求时收到 abort 会怎样？（[PR #111](https://github.com/sgl-project/mini-sglang/pull/111) 讨论的就是这个）
 - 主进程里 `wait_for_ack` 收到结束消息后，这个请求的状态什么时候删掉？（[PR #151](https://github.com/sgl-project/mini-sglang/pull/151)）
+- 在线时，同一个太长的请求会一直卡住（[PR #157](https://github.com/sgl-project/mini-sglang/pull/157)）：非流式和流式分别卡在哪？客户端断开以后，主进程里给它留的状态能不能删掉？要先看懂主进程里的 async 代码（`wait_for_ack` 和外面套的几层生成器），读第 8 段时再回来做实验
 - 开着 overlap scheduling 时，scheduler 处理上一步的结果之前，下一步已经发出去了。一个请求的"结束"是在哪一步被发现的？会不会对同一个请求发两次结束消息？
