@@ -30,7 +30,7 @@
 - Why does overlap scheduling cause bugs like this? -> The CPU's bookkeeping is one step behind the GPU. Between launching a step and processing it, anything that changes a request's state (like an abort) must know the step is still in flight.
 - Same bug, different symptoms -> With a cache hit, the double unlock makes ref_count −1 and crashes; with a miss, the root's unlock does nothing, but the second cache_req frees the request's own pages as duplicates. So test both cases.
 - How to fix it -> Defer the abort's release until the in-flight step is processed (#111's pending_aborts), so every lock is matched by exactly one unlock.
-- More interesting, how to find this new case? -> Asked whether the bug really needs its condition (EOS). It doesn't in prefill, and that case was the crash someone reported months ago.
+- More interesting, how to find this new case? -> Asked whether the bug really needs its condition (EOS). It doesn't in prefill, and that case crashes with the same traceback as a report from months ago.
 - How to reproduce a timing bug without a load test -> Subclass the offline LLM and inject the abort at an exact loop iteration (override _forward and offline_receive_msg). The result is deterministic.
 - Although bugs in overlap scheduling, but there are two different bugs, two fixes -> #111 doesn't fix #168 and #154 doesn't fix #170. Check which code each PR actually changes.
 - Writing the issue -> We should use the general root cause, not one special case.
