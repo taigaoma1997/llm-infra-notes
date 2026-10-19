@@ -2,9 +2,9 @@
 
 This repo is my public learning log: source-code notes, reproducible experiments, and upstream contributions.
 
-- **Now:** reading mini-sglang, and choosing the next nano-vllm issue.
+- **Now:** reading mini-sglang, and find issues and bugs.
 - **Next:** a first contribution to SGLang.
-- **Upcoming:** [SGLang Summit 2026](https://www.sglang.io/summit), Nov 12–13 in San Francisco (registered).
+- **Upcoming:** [SGLang Summit 2026](https://www.sglang.io/summit), Nov 12–13 in San Francisco.
 
 ## Highlights
 
